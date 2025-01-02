@@ -17,9 +17,10 @@ from PyQt5.QtCore import Qt
 
 from config import load_config, save_config
 from settings_dialog import SettingsDialog
+from modern_dashboard import ModernDataAnalysisApp
 
 ##############################################################
-# AGGREGATOR LOGIC (moved from aggregator.py)
+# AGGREGATOR LOGIC
 ##############################################################
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,6 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 def standardize_brand(brand):
-    """
-    Convert brand to uppercase, ignoring NaN or NILL/0 placeholders.
-    """
     if pd.isnull(brand):
         return None
     brand_str = str(brand).strip().upper()
@@ -45,11 +43,6 @@ def standardize_brand(brand):
     return brand_str
 
 def allocate_row_brands(row, brand_cols, workload_cols, days_per_year):
-    """
-    Sum up daily workloads in this row (for the given brand/workload columns),
-    multiply by days_per_year to get an annual number,
-    then proportionally allocate that total among each brand's daily workload.
-    """
     daily_sum = 0.0
     brand_workloads = []
     for bcol, wcol in zip(brand_cols, workload_cols):
@@ -70,10 +63,6 @@ def allocate_row_brands(row, brand_cols, workload_cols, days_per_year):
     return allocations
 
 def aggregate_analyzer(df, brand_cols, workload_cols, days_per_year):
-    """
-    For each row in df, do allocate_row_brands, then sum brand totals.
-    Returns {brand: total_annual}.
-    """
     brand_totals = {}
     for _, row in df.iterrows():
         pairs = allocate_row_brands(row, brand_cols, workload_cols, days_per_year)
@@ -82,9 +71,6 @@ def aggregate_analyzer(df, brand_cols, workload_cols, days_per_year):
     return brand_totals
 
 def calculate_market_share(brand_totals):
-    """
-    Convert brand_totals into a percentage-based dict: {brand: percent}.
-    """
     total = sum(brand_totals.values())
     if total <= 0:
         return {}
@@ -92,10 +78,6 @@ def calculate_market_share(brand_totals):
     return {b: (val / total)*100 for b, val in items}
 
 def city_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
-    """
-    Allocates row-level brand annual totals, groups by city, sums.
-    Returns a pivot where index=city, columns=brands, values=annual samples.
-    """
     rows = []
     for _, row_data in df.iterrows():
         pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
@@ -111,10 +93,6 @@ def city_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
     return final_pivot
 
 def class_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
-    """
-    Allocates row-level brand annual totals, groups by class, sums.
-    Returns a pivot where index=class, columns=brands, values=annual samples.
-    """
     rows = []
     for _, row_data in df.iterrows():
         pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
@@ -202,7 +180,7 @@ class MainWindow(QMainWindow):
         form_layout.addRow(self.checkbox_city)
         form_layout.addRow(self.checkbox_class)
 
-        # Days spin: default from config
+        # Days spin
         self.days_label = QLabel("Days per Year:")
         self.days_spin = QSpinBox()
         self.days_spin.setRange(1, 1000)
@@ -223,10 +201,13 @@ class MainWindow(QMainWindow):
         btn_theme = QPushButton("Toggle Theme")
         btn_theme.clicked.connect(self.toggle_theme)
 
-        # "Push to GitHub" button
         btn_push_git = QPushButton("Push to GitHub")
         btn_push_git.setToolTip("Commits local changes and pushes to the 'origin' remote in Git repository.")
         btn_push_git.clicked.connect(self.push_to_github)
+
+        self.dashboard_button = QPushButton("Open Data Visualization Dashboard")
+        self.dashboard_button.clicked.connect(self.open_dashboard)
+        main_layout.addWidget(self.dashboard_button)
 
         hl_bottom.addWidget(btn_settings)
         hl_bottom.addWidget(btn_process)
@@ -237,6 +218,11 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(widget)
         self.apply_modern_light_theme()
+
+    def open_dashboard(self):
+            """Launch the modern data analysis dashboard (modern_dashboard.py)."""
+            self.dash_window = ModernDataAnalysisApp()
+            self.dash_window.show()
 
     def open_settings(self):
         from settings_dialog import SettingsDialog
@@ -306,35 +292,46 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Missing Cols", f"Missing columns for {analyzer_mode}:\n{missing}")
             return
 
-        # Use aggregator logic within main.py
+        # 1) volume aggregator
         brand_totals = aggregate_analyzer(df, brand_cols, workload_cols, days_per_year)
         if not brand_totals:
             QMessageBox.information(self, "No Data", f"No valid data for {analyzer_mode}")
             return
-
         market_share = calculate_market_share(brand_totals)
 
-        df_city = None
-        if self.checkbox_city.isChecked():
-            df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
-        df_class = None
-        if self.checkbox_class.isChecked():
-            df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
+        # 2) value aggregator (cost-based)
+        cost_per_test = float(self.config_data["cost_per_test"].get(analyzer_mode, 0))
+        brand_values = {b: (brand_totals[b] * cost_per_test) for b in brand_totals}
+        market_share_value = calculate_market_share(brand_values)
 
-        df_totals = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Total Yearly"])
-        df_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "Market Share (%)"])
+        # city/class pivot (volume-based)
+        df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_city.isChecked() else None
+        df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_class.isChecked() else None
 
-        self.save_results(analyzer_mode, df_totals, df_share, df_city, df_class)
+        # Make a combined single sheet with columns for volume & share, plus value & share
+        # Brand, Volume, VolumeShare, Value, ValueShare
+        df_combined = self.build_combined_df(brand_totals, market_share, brand_values, market_share_value)
 
+        # Now save everything to just 1 sheet for the analyzer + optional pivot sheets
+        self.save_results_one_sheet(analyzer_mode, df_combined, df_city, df_class)
+
+        # Show summary
         top_brand = max(market_share, key=market_share.get) if market_share else None
         sites = df["Customer Name"].nunique() if "Customer Name" in df.columns else len(df)
         msg = f"{analyzer_mode} done.\n"
         if top_brand:
-            msg += f"Top brand: {top_brand} => {market_share[top_brand]:.1f}%\n"
+            msg += f"Top brand (Volume): {top_brand} => {market_share[top_brand]:.1f}%\n"
+        if market_share_value:
+            top_brand_val = max(market_share_value, key=market_share_value.get)
+            msg += f"Top brand (Value): {top_brand_val} => {market_share_value[top_brand_val]:.1f}%\n"
         msg += f"Sites processed: {sites}"
         QMessageBox.information(self, "Done", msg)
 
     def process_consolidated(self, df, days_per_year):
+        """
+        For each analyzer, compute volume & value, but store each in a single sheet
+        e.g. 'IA', 'CBC', 'CHEM'. Optionally city/class pivot in separate sheets if needed.
+        """
         for mode in ["IA", "CBC", "CHEM"]:
             brand_cols = self.config_data["headers"][mode]["brand_cols"]
             workload_cols = self.config_data["headers"][mode]["workload_cols"]
@@ -350,47 +347,77 @@ class MainWindow(QMainWindow):
                 continue
             market_share = calculate_market_share(brand_totals)
 
-            df_city = None
-            if self.checkbox_city.isChecked():
-                df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
-            df_class = None
-            if self.checkbox_class.isChecked():
-                df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
+            cost_per_test = float(self.config_data["cost_per_test"].get(mode, 0))
+            brand_values = {b: (brand_totals[b] * cost_per_test) for b in brand_totals}
+            market_share_value = calculate_market_share(brand_values)
 
-            df_totals = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Total Yearly"])
-            df_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "Market Share (%)"])
-            self.save_results(mode, df_totals, df_share, df_city, df_class)
+            df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_city.isChecked() else None
+            df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_class.isChecked() else None
+
+            df_combined = self.build_combined_df(brand_totals, market_share, brand_values, market_share_value)
+
+            self.save_results_one_sheet(mode, df_combined, df_city, df_class)
 
         sites = df["Customer Name"].nunique() if "Customer Name" in df.columns else len(df)
         QMessageBox.information(self, "Done", f"Consolidated run done. Sites processed: {sites}")
 
-    def save_results(self, analyzer_mode, df_totals, df_share, df_city, df_class):
+    def build_combined_df(self, brand_totals, market_share, brand_values, market_share_value):
+        """
+        Merge volume totals & shares with value totals & shares into a single DataFrame
+        with columns: Brand, Volume, VolumeShare, Value, ValueShare
+        """
+
+        # Convert dict -> DataFrame
+        df_vol = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Volume"])
+        df_vol_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "VolumeShare"])
+
+        df_val = pd.DataFrame(list(brand_values.items()), columns=["Brand", "Value"])
+        df_val_share = pd.DataFrame(list(market_share_value.items()), columns=["Brand", "ValueShare"])
+
+        # Merge them all on Brand
+        df_merge = pd.merge(df_vol, df_vol_share, on="Brand", how="outer")
+        df_merge = pd.merge(df_merge, df_val, on="Brand", how="outer")
+        df_merge = pd.merge(df_merge, df_val_share, on="Brand", how="outer")
+
+        # Round columns if needed
+        df_merge["Volume"] = df_merge["Volume"].round(1)
+        df_merge["VolumeShare"] = df_merge["VolumeShare"].round(1)
+        df_merge["Value"] = df_merge["Value"].round(1)
+        df_merge["ValueShare"] = df_merge["ValueShare"].round(1)
+
+        return df_merge
+
+    def save_results_one_sheet(self, analyzer_mode, df_combined, df_city, df_class):
+        """
+        Writes a single sheet named e.g. 'IA' for volume+value results,
+        plus optional 'IA_CityPivot', 'IA_ClassPivot' for pivot data.
+        """
         from openpyxl.utils.exceptions import InvalidFileException
         from openpyxl import load_workbook
-        sheet_base = analyzer_mode.upper()
 
+        sheet_base = analyzer_mode.upper()
         output_path = self.output_edit.text()
+
         if os.path.exists(output_path):
             try:
                 with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                    df_totals.to_excel(writer, sheet_name=f"{sheet_base}_Totals", index=False)
-                    df_share.to_excel(writer, sheet_name=f"{sheet_base}_Share", index=False)
+                    df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
+
                     if df_city is not None:
                         df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
                     if df_class is not None:
                         df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
             except InvalidFileException:
                 with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                    df_totals.to_excel(writer, sheet_name=f"{sheet_base}_Totals", index=False)
-                    df_share.to_excel(writer, sheet_name=f"{sheet_base}_Share", index=False)
+                    df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
+
                     if df_city is not None:
                         df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
                     if df_class is not None:
                         df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
         else:
             with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                df_totals.to_excel(writer, sheet_name=f"{sheet_base}_Totals", index=False)
-                df_share.to_excel(writer, sheet_name=f"{sheet_base}_Share", index=False)
+                df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
                 if df_city is not None:
                     df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
                 if df_class is not None:
@@ -399,7 +426,6 @@ class MainWindow(QMainWindow):
     def toggle_theme(self):
         if not hasattr(self, 'dark_mode'):
             self.dark_mode = False
-
         if not self.dark_mode:
             self.apply_modern_dark_theme()
             self.dark_mode = True
@@ -464,10 +490,6 @@ class MainWindow(QMainWindow):
         """)
 
     def push_to_github(self):
-        """
-        Example function to stage all changes, commit, and push to 'origin'.
-        User must have a valid Git repo and remote named 'origin' set up.
-        """
         commit_msg, ok = QInputDialog.getText(
             self,
             "Commit Message",
@@ -477,20 +499,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Commit", "Commit canceled (no message).")
             return
 
-        # We assume current working dir is the project folder with a .git repo.
-        # If your code is in a different path, adjust accordingly.
         project_dir = os.path.dirname(__file__)
 
         try:
-            # Stage all changes
             subprocess.run(["git", "add", "."], cwd=project_dir, check=True)
-
-            # Commit
             subprocess.run(["git", "commit", "-m", commit_msg.strip()], cwd=project_dir, check=True)
-
-            # Push
             subprocess.run(["git", "push", "origin", "main"], cwd=project_dir, check=True)
-
             QMessageBox.information(self, "Git", "Changes pushed to GitHub successfully!")
         except subprocess.CalledProcessError as e:
             logger.exception("Git command failed")
@@ -501,7 +515,7 @@ class MainWindow(QMainWindow):
 
 def main():
     print("DEBUG: About to create QApplication")
-    logging.info("Launching Multi-Analyzer with Configurable Headers and Git Integration.")
+    logging.info("Launching Multi-Analyzer with Configurable Headers + Git Integration.")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
