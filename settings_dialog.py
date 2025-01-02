@@ -1,86 +1,117 @@
-# settings_dialog.py
 import logging
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFormLayout, QSpinBox
+    QPushButton, QFormLayout, QSpinBox, QMessageBox
 )
 from PyQt5.QtCore import Qt
-from config import save_config
+from config import ConfigManager, ConfigurationError
 
 logger = logging.getLogger(__name__)
 
 class SettingsDialog(QDialog):
-    def __init__(self, config_data, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
+        self.config_manager = ConfigManager()
+        self.config_data = self.config_manager.get_config()
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Initialize and setup the user interface."""
         self.setWindowTitle("Settings")
-        self.config_data = config_data  # dictionary from load_config()
+        self.setMinimumWidth(400)
 
-        layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
+        form_layout = self.create_form_layout()
+        button_layout = self.create_button_layout()
 
+        main_layout.addLayout(form_layout)
+        main_layout.addLayout(button_layout)
+        self.setLayout(main_layout)
+
+    def create_form_layout(self):
+        """Create and return the form layout with all input fields."""
         form = QFormLayout()
 
-        # IA brand cols
-        ia_brand_str = ", ".join(self.config_data["headers"]["IA"]["brand_cols"])
-        ia_workload_str = ", ".join(self.config_data["headers"]["IA"]["workload_cols"])
-        self.ia_brand_edit = QLineEdit(ia_brand_str)
-        self.ia_workload_edit = QLineEdit(ia_workload_str)
-        form.addRow(QLabel("IA brand cols (comma-separated):"), self.ia_brand_edit)
-        form.addRow(QLabel("IA workload cols:"), self.ia_workload_edit)
+        # Create department input fields
+        self.department_fields = {}
+        for department in ["IA", "CBC", "CHEM"]:
+            fields = self.create_department_fields(department)
+            self.department_fields[department] = fields
+            form.addRow(QLabel(f"{department} brand cols:"), fields['brand'])
+            form.addRow(QLabel(f"{department} workload cols:"), fields['workload'])
 
-        # CBC
-        cbc_brand_str = ", ".join(self.config_data["headers"]["CBC"]["brand_cols"])
-        cbc_workload_str = ", ".join(self.config_data["headers"]["CBC"]["workload_cols"])
-        self.cbc_brand_edit = QLineEdit(cbc_brand_str)
-        self.cbc_workload_edit = QLineEdit(cbc_workload_str)
-        form.addRow(QLabel("CBC brand cols:"), self.cbc_brand_edit)
-        form.addRow(QLabel("CBC workload cols:"), self.cbc_workload_edit)
-
-        # CHEM
-        chem_brand_str = ", ".join(self.config_data["headers"]["CHEM"]["brand_cols"])
-        chem_workload_str = ", ".join(self.config_data["headers"]["CHEM"]["workload_cols"])
-        self.chem_brand_edit = QLineEdit(chem_brand_str)
-        self.chem_workload_edit = QLineEdit(chem_workload_str)
-        form.addRow(QLabel("CHEM brand cols:"), self.chem_brand_edit)
-        form.addRow(QLabel("CHEM workload cols:"), self.chem_workload_edit)
-
-        # Days per year
+        # Days per year spinner
         self.days_spin = QSpinBox()
         self.days_spin.setRange(1, 1000)
-        self.days_spin.setValue(self.config_data.get("days_per_year", 330))
+        self.days_spin.setValue(self.config_manager.get_days_per_year())
         form.addRow(QLabel("Days per Year:"), self.days_spin)
 
-        layout.addLayout(form)
+        return form
 
-        hl = QHBoxLayout()
-        btn_save = QPushButton("Save")
-        btn_save.clicked.connect(self.save_settings)
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(self.reject)
-        hl.addWidget(btn_save)
-        hl.addWidget(btn_cancel)
+    def create_department_fields(self, department):
+        """Create and initialize input fields for a department."""
+        brand_cols = self.config_manager.get_brand_columns(department)
+        workload_cols = self.config_manager.get_workload_columns(department)
 
-        layout.addLayout(hl)
-        self.setLayout(layout)
+        brand_edit = QLineEdit(", ".join(brand_cols))
+        workload_edit = QLineEdit(", ".join(workload_cols))
+
+        brand_edit.setToolTip("Enter comma-separated column names")
+        workload_edit.setToolTip("Enter comma-separated column names")
+
+        return {'brand': brand_edit, 'workload': workload_edit}
+
+    def create_button_layout(self):
+        """Create and return the button layout."""
+        button_layout = QHBoxLayout()
+
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save_settings)
+        save_button.setDefault(True)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(cancel_button)
+
+        return button_layout
+
+    def validate_inputs(self):
+        """Validate user inputs before saving."""
+        for department, fields in self.department_fields.items():
+            brand_cols = [x.strip() for x in fields['brand'].text().split(",") if x.strip()]
+            workload_cols = [x.strip() for x in fields['workload'].text().split(",") if x.strip()]
+
+            if len(brand_cols) != len(workload_cols):
+                raise ValueError(
+                    f"{department}: Number of brand columns ({len(brand_cols)}) "
+                    f"does not match workload columns ({len(workload_cols)})"
+                )
+
+            if not brand_cols or not workload_cols:
+                raise ValueError(f"{department}: Brand and workload columns cannot be empty")
 
     def save_settings(self):
-        # Convert text fields into lists
-        ia_brands = [x.strip() for x in self.ia_brand_edit.text().split(",")]
-        ia_workloads = [x.strip() for x in self.ia_workload_edit.text().split(",")]
-        cbc_brands = [x.strip() for x in self.cbc_brand_edit.text().split(",")]
-        cbc_workloads = [x.strip() for x in self.cbc_workload_edit.text().split(",")]
-        chem_brands = [x.strip() for x in self.chem_brand_edit.text().split(",")]
-        chem_workloads = [x.strip() for x in self.chem_workload_edit.text().split(",")]
+        """Save the configuration if valid."""
+        try:
+            self.validate_inputs()
 
-        self.config_data["headers"]["IA"]["brand_cols"] = ia_brands
-        self.config_data["headers"]["IA"]["workload_cols"] = ia_workloads
+            # Update configuration data
+            for department, fields in self.department_fields.items():
+                brand_cols = [x.strip() for x in fields['brand'].text().split(",") if x.strip()]
+                workload_cols = [x.strip() for x in fields['workload'].text().split(",") if x.strip()]
 
-        self.config_data["headers"]["CBC"]["brand_cols"] = cbc_brands
-        self.config_data["headers"]["CBC"]["workload_cols"] = cbc_workloads
+                self.config_data["headers"][department]["brand_cols"] = brand_cols
+                self.config_data["headers"][department]["workload_cols"] = workload_cols
 
-        self.config_data["headers"]["CHEM"]["brand_cols"] = chem_brands
-        self.config_data["headers"]["CHEM"]["workload_cols"] = chem_workloads
+            self.config_data["days_per_year"] = self.days_spin.value()
 
-        self.config_data["days_per_year"] = self.days_spin.value()
+            # Save configuration
+            self.config_manager.save_config(self.config_data)
+            QMessageBox.information(self, "Success", "Settings saved successfully")
+            self.accept()
 
-        save_config(self.config_data)
-        self.accept()
+        except (ValueError, ConfigurationError) as e:
+            QMessageBox.critical(self, "Error", str(e))
+            logger.error(f"Settings validation failed: {e}")

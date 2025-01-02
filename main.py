@@ -1,7 +1,9 @@
 # main.py
+
 import sys
 import os
 import logging
+import subprocess
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -19,6 +21,7 @@ from aggregator import (
     aggregate_analyzer, calculate_market_share,
     city_pivot_advanced, class_pivot_advanced
 )
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -50,10 +53,10 @@ def check_missing_columns(df, required_cols):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Multi-Analyzer with Configurable Headers")
+        self.setWindowTitle("Multi-Analyzer with Configurable Headers + Git Integration")
         self.setGeometry(200, 200, 900, 600)
 
-        # Load config
+        # Load config from config.json
         self.config_data = load_config()
 
         widget = QWidget()
@@ -93,7 +96,7 @@ class MainWindow(QMainWindow):
         self.region_filter_edit.setPlaceholderText("Optional region filter...")
         form_layout.addRow(QLabel("Region Filter:"), self.region_filter_edit)
 
-        # city/class check
+        # City/Class check
         self.checkbox_city = QCheckBox("City Pivot?")
         self.checkbox_class = QCheckBox("Class Pivot?")
         form_layout.addRow(self.checkbox_city)
@@ -110,17 +113,25 @@ class MainWindow(QMainWindow):
 
         # Action buttons
         hl_bottom = QHBoxLayout()
+
         btn_settings = QPushButton("Settings")
         btn_settings.clicked.connect(self.open_settings)
 
         btn_process = QPushButton("Process")
         btn_process.clicked.connect(self.process_data)
+
         btn_theme = QPushButton("Toggle Theme")
         btn_theme.clicked.connect(self.toggle_theme)
+
+        # NEW: "Push to GitHub" button
+        btn_push_git = QPushButton("Push to GitHub")
+        btn_push_git.setToolTip("Commits local changes and pushes to the 'origin' remote in Git repository.")
+        btn_push_git.clicked.connect(self.push_to_github)
 
         hl_bottom.addWidget(btn_settings)
         hl_bottom.addWidget(btn_process)
         hl_bottom.addWidget(btn_theme)
+        hl_bottom.addWidget(btn_push_git)
 
         main_layout.addLayout(hl_bottom)
 
@@ -131,7 +142,7 @@ class MainWindow(QMainWindow):
         from settings_dialog import SettingsDialog
         dialog = SettingsDialog(self.config_data, self)
         if dialog.exec_():
-            # user clicked save
+            # user clicked Save in settings
             self.config_data = load_config()  # reload from file
             self.days_spin.setValue(self.config_data.get("days_per_year", 330))
             QMessageBox.information(self, "Settings Saved", "Settings updated successfully.")
@@ -163,7 +174,7 @@ class MainWindow(QMainWindow):
 
         region_filter = self.region_filter_edit.text().strip()
         days_per_year = self.days_spin.value()
-        self.config_data["days_per_year"] = days_per_year  # store in memory (and optionally save_config)
+        self.config_data["days_per_year"] = days_per_year
 
         # Load data
         try:
@@ -179,7 +190,7 @@ class MainWindow(QMainWindow):
             else:
                 old_len = len(df)
                 df = df[df["Region"] == region_filter]
-                logger.info(f"Region filter '{region_filter}': {old_len}->{len(df)} rows")
+                logger.info(f"Region filter '{region_filter}': {old_len} -> {len(df)} rows")
 
         analyzer_mode = self.combo_analyzer.currentText()
         if analyzer_mode == "Consolidated":
@@ -188,11 +199,9 @@ class MainWindow(QMainWindow):
             self.process_single_analyzer(df, analyzer_mode, days_per_year)
 
     def process_single_analyzer(self, df, analyzer_mode, days_per_year):
-        # Load brand_cols/workload_cols from config_data
         brand_cols = self.config_data["headers"][analyzer_mode]["brand_cols"]
         workload_cols = self.config_data["headers"][analyzer_mode]["workload_cols"]
 
-        # Check columns
         missing = check_missing_columns(df, brand_cols + workload_cols)
         if missing:
             QMessageBox.critical(self, "Missing Cols", f"Missing columns for {analyzer_mode}:\n{missing}")
@@ -204,6 +213,7 @@ class MainWindow(QMainWindow):
         if not brand_totals:
             QMessageBox.information(self, "No Data", f"No valid data for {analyzer_mode}")
             return
+
         market_share = calculate_market_share(brand_totals)
 
         df_city = None
@@ -212,9 +222,6 @@ class MainWindow(QMainWindow):
         df_class = None
         if self.checkbox_class.isChecked():
             df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
-
-        from datetime import datetime
-        now = datetime.now()
 
         df_totals = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Total Yearly"])
         df_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "Market Share (%)"])
@@ -231,14 +238,13 @@ class MainWindow(QMainWindow):
 
     def process_consolidated(self, df, days_per_year):
         from aggregator import aggregate_analyzer, calculate_market_share
-
-        # We'll do IA, CBC, CHEM in one pass:
         for mode in ["IA", "CBC", "CHEM"]:
             brand_cols = self.config_data["headers"][mode]["brand_cols"]
             workload_cols = self.config_data["headers"][mode]["workload_cols"]
+
             missing = check_missing_columns(df, brand_cols + workload_cols)
             if missing:
-                logger.warning(f"Skipping {mode}, missing cols: {missing}")
+                logger.warning(f"Skipping {mode}, missing columns: {missing}")
                 continue
 
             brand_totals = aggregate_analyzer(df, brand_cols, workload_cols, days_per_year)
@@ -248,7 +254,6 @@ class MainWindow(QMainWindow):
             market_share = calculate_market_share(brand_totals)
 
             from aggregator import city_pivot_advanced, class_pivot_advanced
-
             df_city = None
             if self.checkbox_city.isChecked():
                 df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
@@ -258,7 +263,6 @@ class MainWindow(QMainWindow):
 
             df_totals = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Total Yearly"])
             df_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "Market Share (%)"])
-
             self.save_results(mode, df_totals, df_share, df_city, df_class)
 
         sites = df["Customer Name"].nunique() if "Customer Name" in df.columns else len(df)
@@ -360,8 +364,43 @@ class MainWindow(QMainWindow):
             }
         """)
 
+    ### NEW: Git push logic ###
+    def push_to_github(self):
+        """
+        Example function to stage all changes, commit, and push to 'origin'.
+        User must have a valid Git repo and remote named 'origin' set up.
+        """
+        # We prompt for a commit message (optional improvement)
+        commit_msg, ok = QLineEdit.getText(self, "Commit Message", "Enter commit message:")
+        if not ok or not commit_msg.strip():
+            QMessageBox.information(self, "No Commit", "Commit canceled (no message).")
+            return
+
+        # We assume current working dir is the project folder with a .git repo.
+        # If your code is in a different path, adjust accordingly.
+        project_dir = os.path.dirname(__file__)
+
+        try:
+            # Stage all changes
+            subprocess.run(["git", "add", "."], cwd=project_dir, check=True)
+
+            # Commit
+            subprocess.run(["git", "commit", "-m", commit_msg.strip()], cwd=project_dir, check=True)
+
+            # Push
+            subprocess.run(["git", "push", "origin", "main"], cwd=project_dir, check=True)
+
+            QMessageBox.information(self, "Git", "Changes pushed to GitHub successfully!")
+        except subprocess.CalledProcessError as e:
+            logger.exception("Git command failed")
+            QMessageBox.critical(self, "Git Error", f"Git command failed:\n{str(e)}")
+        except Exception as e:
+            logger.exception("Unexpected error with Git push")
+            QMessageBox.critical(self, "Git Error", f"Unexpected error:\n{str(e)}")
+
+
 def main():
-    logging.info("Launching Multi-Analyzer with Configurable Headers.")
+    logging.info("Launching Multi-Analyzer with Configurable Headers and Git Integration.")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
