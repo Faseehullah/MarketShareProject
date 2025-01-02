@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+env/
+
+# IDEs
+.idea/
+
+# Project specific
+Output Jan 2025/*.xlsx
+*.log
+
+# Allow VS Code settings
+!.vscode/
+!.vscode/settings.json
+!.vscode/launch.json
