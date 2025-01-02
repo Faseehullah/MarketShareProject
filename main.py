@@ -11,16 +11,16 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QComboBox, QMessageBox, QLineEdit,
-    QFormLayout, QCheckBox, QSpinBox
+    QFormLayout, QCheckBox, QSpinBox, QInputDialog
 )
 from PyQt5.QtCore import Qt
 
 from config import load_config, save_config
 from settings_dialog import SettingsDialog
-from aggregator import (
-    aggregate_analyzer, calculate_market_share,
-    city_pivot_advanced, class_pivot_advanced
-)
+
+##############################################################
+# AGGREGATOR LOGIC (moved from aggregator.py)
+##############################################################
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -32,6 +32,106 @@ console_formatter = logging.Formatter(
 )
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
+
+def standardize_brand(brand):
+    """
+    Convert brand to uppercase, ignoring NaN or NILL/0 placeholders.
+    """
+    if pd.isnull(brand):
+        return None
+    brand_str = str(brand).strip().upper()
+    if brand_str in ["NILL", "", "0"]:
+        return None
+    return brand_str
+
+def allocate_row_brands(row, brand_cols, workload_cols, days_per_year):
+    """
+    Sum up daily workloads in this row (for the given brand/workload columns),
+    multiply by days_per_year to get an annual number,
+    then proportionally allocate that total among each brand's daily workload.
+    """
+    daily_sum = 0.0
+    brand_workloads = []
+    for bcol, wcol in zip(brand_cols, workload_cols):
+        raw_brand = row.get(bcol)
+        brand = standardize_brand(raw_brand)
+        w = row.get(wcol, 0) or 0
+        if brand and w > 0:
+            brand_workloads.append((brand, w))
+            daily_sum += w
+    if daily_sum <= 0:
+        return []
+    total_yearly = daily_sum * days_per_year
+    allocations = []
+    for (brand, w) in brand_workloads:
+        proportion = w / daily_sum
+        allocated = total_yearly * proportion
+        allocations.append((brand, allocated))
+    return allocations
+
+def aggregate_analyzer(df, brand_cols, workload_cols, days_per_year):
+    """
+    For each row in df, do allocate_row_brands, then sum brand totals.
+    Returns {brand: total_annual}.
+    """
+    brand_totals = {}
+    for _, row in df.iterrows():
+        pairs = allocate_row_brands(row, brand_cols, workload_cols, days_per_year)
+        for brand, allocated in pairs:
+            brand_totals[brand] = brand_totals.get(brand, 0) + allocated
+    return brand_totals
+
+def calculate_market_share(brand_totals):
+    """
+    Convert brand_totals into a percentage-based dict: {brand: percent}.
+    """
+    total = sum(brand_totals.values())
+    if total <= 0:
+        return {}
+    items = sorted(brand_totals.items(), key=lambda x: x[1], reverse=True)
+    return {b: (val / total)*100 for b, val in items}
+
+def city_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
+    """
+    Allocates row-level brand annual totals, groups by city, sums.
+    Returns a pivot where index=city, columns=brands, values=annual samples.
+    """
+    rows = []
+    for _, row_data in df.iterrows():
+        pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
+        city = str(row_data.get("CITY", "UNKNOWN")).strip()
+        for (brand, allocated) in pairs:
+            rows.append({"CITY": city, "BRAND": brand, "ALLOCATED_YEARLY": allocated})
+    if not rows:
+        return None
+    city_df = pd.DataFrame(rows)
+    pivoted = city_df.groupby(["CITY", "BRAND"])["ALLOCATED_YEARLY"].sum().reset_index()
+    final_pivot = pivoted.pivot(index="CITY", columns="BRAND", values="ALLOCATED_YEARLY").fillna(0)
+    final_pivot.reset_index(inplace=True)
+    return final_pivot
+
+def class_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
+    """
+    Allocates row-level brand annual totals, groups by class, sums.
+    Returns a pivot where index=class, columns=brands, values=annual samples.
+    """
+    rows = []
+    for _, row_data in df.iterrows():
+        pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
+        clss = str(row_data.get("Class", "UNKNOWN")).strip()
+        for (brand, allocated) in pairs:
+            rows.append({"CLASS": clss, "BRAND": brand, "ALLOCATED_YEARLY": allocated})
+    if not rows:
+        return None
+    class_df = pd.DataFrame(rows)
+    pivoted = class_df.groupby(["CLASS", "BRAND"])["ALLOCATED_YEARLY"].sum().reset_index()
+    final_pivot = pivoted.pivot(index="CLASS", columns="BRAND", values="ALLOCATED_YEARLY").fillna(0)
+    final_pivot.reset_index(inplace=True)
+    return final_pivot
+
+##############################################################
+# END aggregator logic
+##############################################################
 
 def load_sheet_names(file_path):
     try:
@@ -123,7 +223,7 @@ class MainWindow(QMainWindow):
         btn_theme = QPushButton("Toggle Theme")
         btn_theme.clicked.connect(self.toggle_theme)
 
-        # NEW: "Push to GitHub" button
+        # "Push to GitHub" button
         btn_push_git = QPushButton("Push to GitHub")
         btn_push_git.setToolTip("Commits local changes and pushes to the 'origin' remote in Git repository.")
         btn_push_git.clicked.connect(self.push_to_github)
@@ -142,7 +242,6 @@ class MainWindow(QMainWindow):
         from settings_dialog import SettingsDialog
         dialog = SettingsDialog(self.config_data, self)
         if dialog.exec_():
-            # user clicked Save in settings
             self.config_data = load_config()  # reload from file
             self.days_spin.setValue(self.config_data.get("days_per_year", 330))
             QMessageBox.information(self, "Settings Saved", "Settings updated successfully.")
@@ -207,8 +306,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Missing Cols", f"Missing columns for {analyzer_mode}:\n{missing}")
             return
 
-        from aggregator import aggregate_analyzer, calculate_market_share, city_pivot_advanced, class_pivot_advanced
-
+        # Use aggregator logic within main.py
         brand_totals = aggregate_analyzer(df, brand_cols, workload_cols, days_per_year)
         if not brand_totals:
             QMessageBox.information(self, "No Data", f"No valid data for {analyzer_mode}")
@@ -237,7 +335,6 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Done", msg)
 
     def process_consolidated(self, df, days_per_year):
-        from aggregator import aggregate_analyzer, calculate_market_share
         for mode in ["IA", "CBC", "CHEM"]:
             brand_cols = self.config_data["headers"][mode]["brand_cols"]
             workload_cols = self.config_data["headers"][mode]["workload_cols"]
@@ -253,7 +350,6 @@ class MainWindow(QMainWindow):
                 continue
             market_share = calculate_market_share(brand_totals)
 
-            from aggregator import city_pivot_advanced, class_pivot_advanced
             df_city = None
             if self.checkbox_city.isChecked():
                 df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year)
@@ -301,6 +397,9 @@ class MainWindow(QMainWindow):
                     df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
 
     def toggle_theme(self):
+        if not hasattr(self, 'dark_mode'):
+            self.dark_mode = False
+
         if not self.dark_mode:
             self.apply_modern_dark_theme()
             self.dark_mode = True
@@ -364,14 +463,16 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    ### NEW: Git push logic ###
     def push_to_github(self):
         """
         Example function to stage all changes, commit, and push to 'origin'.
         User must have a valid Git repo and remote named 'origin' set up.
         """
-        # We prompt for a commit message (optional improvement)
-        commit_msg, ok = QLineEdit.getText(self, "Commit Message", "Enter commit message:")
+        commit_msg, ok = QInputDialog.getText(
+            self,
+            "Commit Message",
+            "Enter commit message:"
+        )
         if not ok or not commit_msg.strip():
             QMessageBox.information(self, "No Commit", "Commit canceled (no message).")
             return
@@ -398,10 +499,13 @@ class MainWindow(QMainWindow):
             logger.exception("Unexpected error with Git push")
             QMessageBox.critical(self, "Git Error", f"Unexpected error:\n{str(e)}")
 
-
 def main():
+    print("DEBUG: About to create QApplication")
     logging.info("Launching Multi-Analyzer with Configurable Headers and Git Integration.")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
