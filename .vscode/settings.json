@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "${env:USERPROFILE}\\.conda\\envs\\marketsurvey\\python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ],
+    "editor.formatOnSave": true,
+    "files.trimTrailingWhitespace": true,
+    "python.linting.enabled": true
+}
