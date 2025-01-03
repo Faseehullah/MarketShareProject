@@ -3,521 +3,655 @@
 import sys
 import os
 import logging
-import subprocess
+from datetime import datetime
+from typing import Optional, Dict, Any
+
+# Data processing imports
 import pandas as pd
 import numpy as np
-from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
+# PyQt imports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QComboBox, QMessageBox, QLineEdit,
-    QFormLayout, QCheckBox, QSpinBox, QInputDialog
+    QFormLayout, QCheckBox, QSpinBox, QTabWidget, QGroupBox, QScrollArea
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 
-from config import load_config, save_config
-from settings_dialog import SettingsDialog
-from modern_dashboard import ModernDataAnalysisApp
-
-##############################################################
-# AGGREGATOR LOGIC
-##############################################################
+# Local imports
+from aggregator import WorkingAggregator, AnalysisResult
+from config import MarketAnalysisConfig
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
-console_handler = logging.StreamHandler(sys.stdout)
-console_formatter = logging.Formatter(
-    "[%(asctime)s] %(levelname)s - %(name)s : %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
-
-def standardize_brand(brand):
-    if pd.isnull(brand):
-        return None
-    brand_str = str(brand).strip().upper()
-    if brand_str in ["NILL", "", "0"]:
-        return None
-    return brand_str
-
-def allocate_row_brands(row, brand_cols, workload_cols, days_per_year):
-    daily_sum = 0.0
-    brand_workloads = []
-    for bcol, wcol in zip(brand_cols, workload_cols):
-        raw_brand = row.get(bcol)
-        brand = standardize_brand(raw_brand)
-        w = row.get(wcol, 0) or 0
-        if brand and w > 0:
-            brand_workloads.append((brand, w))
-            daily_sum += w
-    if daily_sum <= 0:
-        return []
-    total_yearly = daily_sum * days_per_year
-    allocations = []
-    for (brand, w) in brand_workloads:
-        proportion = w / daily_sum
-        allocated = total_yearly * proportion
-        allocations.append((brand, allocated))
-    return allocations
-
-def aggregate_analyzer(df, brand_cols, workload_cols, days_per_year):
-    brand_totals = {}
-    for _, row in df.iterrows():
-        pairs = allocate_row_brands(row, brand_cols, workload_cols, days_per_year)
-        for brand, allocated in pairs:
-            brand_totals[brand] = brand_totals.get(brand, 0) + allocated
-    return brand_totals
-
-def calculate_market_share(brand_totals):
-    total = sum(brand_totals.values())
-    if total <= 0:
-        return {}
-    items = sorted(brand_totals.items(), key=lambda x: x[1], reverse=True)
-    return {b: (val / total)*100 for b, val in items}
-
-def city_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
-    rows = []
-    for _, row_data in df.iterrows():
-        pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
-        city = str(row_data.get("CITY", "UNKNOWN")).strip()
-        for (brand, allocated) in pairs:
-            rows.append({"CITY": city, "BRAND": brand, "ALLOCATED_YEARLY": allocated})
-    if not rows:
-        return None
-    city_df = pd.DataFrame(rows)
-    pivoted = city_df.groupby(["CITY", "BRAND"])["ALLOCATED_YEARLY"].sum().reset_index()
-    final_pivot = pivoted.pivot(index="CITY", columns="BRAND", values="ALLOCATED_YEARLY").fillna(0)
-    final_pivot.reset_index(inplace=True)
-    return final_pivot
-
-def class_pivot_advanced(df, brand_cols, workload_cols, days_per_year):
-    rows = []
-    for _, row_data in df.iterrows():
-        pairs = allocate_row_brands(row_data, brand_cols, workload_cols, days_per_year)
-        clss = str(row_data.get("Class", "UNKNOWN")).strip()
-        for (brand, allocated) in pairs:
-            rows.append({"CLASS": clss, "BRAND": brand, "ALLOCATED_YEARLY": allocated})
-    if not rows:
-        return None
-    class_df = pd.DataFrame(rows)
-    pivoted = class_df.groupby(["CLASS", "BRAND"])["ALLOCATED_YEARLY"].sum().reset_index()
-    final_pivot = pivoted.pivot(index="CLASS", columns="BRAND", values="ALLOCATED_YEARLY").fillna(0)
-    final_pivot.reset_index(inplace=True)
-    return final_pivot
-
-##############################################################
-# END aggregator logic
-##############################################################
-
-def load_sheet_names(file_path):
+def load_sheet_names(file_path: str) -> list:
+    """Load and return all sheet names from an Excel file."""
     try:
         xls = pd.ExcelFile(file_path)
         return xls.sheet_names
-    except:
+    except Exception as e:
         logger.exception("Error reading sheet names.")
+        QMessageBox.critical(None, "Error", f"Failed to read sheet names: {str(e)}")
         return []
 
-def load_data(file_path, sheet_name):
-    df = pd.read_excel(file_path, sheet_name=sheet_name)
-    df = df.replace(["NILL", "Nill", "nill"], np.nan)
-    return df
-
-def check_missing_columns(df, required_cols):
-    missing = [col for col in required_cols if col not in df.columns]
-    return missing
-
-class MainWindow(QMainWindow):
+class ModernMarketAnalyzer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Multi-Analyzer with Configurable Headers + Git Integration")
-        self.setGeometry(200, 200, 900, 600)
+        self.config = MarketAnalysisConfig()
+        self.setup_logger()
+        self.latest_results: Optional[AnalysisResult] = None  # To store the latest analysis results
+        self.init_ui()
 
-        # Load config from config.json
-        self.config_data = load_config()
+    def setup_logger(self):
+        """Configure logging for the application."""
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter(
+            '[%(asctime)s] %(levelname)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        logger.addHandler(handler)
 
-        widget = QWidget()
-        main_layout = QVBoxLayout(widget)
+    def init_ui(self):
+        """Initialize the main user interface."""
+        self.setWindowTitle("Market Share Analysis Tool")
+        self.setGeometry(100, 100, 1200, 800)
 
-        form_layout = QFormLayout()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
 
-        # Input file
+        main_layout = QVBoxLayout(central_widget)
+
+        # Create tabs for different sections
+        tab_widget = QTabWidget()
+        tab_widget.addTab(self.create_input_tab(), "Data Input")
+        tab_widget.addTab(self.create_analysis_tab(), "Analysis")
+        tab_widget.addTab(self.create_visualization_tab(), "Visualization")
+
+        main_layout.addWidget(tab_widget)
+
+        # Status bar for feedback
+        self.statusBar().showMessage("Ready")
+
+        self.apply_modern_style()
+
+    def create_input_tab(self) -> QWidget:
+        """Create the data input tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # File selection group
+        file_group = QGroupBox("File Selection")
+        file_layout = QFormLayout()
+
+        # Input file selection
         self.input_edit = QLineEdit()
-        btn_input = QPushButton("Browse Input Excel")
-        btn_input.clicked.connect(self.browse_input)
-        hl_in = QHBoxLayout()
-        hl_in.addWidget(self.input_edit)
-        hl_in.addWidget(btn_input)
-        form_layout.addRow(QLabel("Input File:"), hl_in)
+        browse_input_btn = QPushButton("Browse")
+        browse_input_btn.clicked.connect(self.browse_input)
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(self.input_edit)
+        input_layout.addWidget(browse_input_btn)
+        file_layout.addRow("Input Excel:", input_layout)
 
-        # Output file
-        self.output_edit = QLineEdit()
-        btn_output = QPushButton("Browse Output Excel")
-        btn_output.clicked.connect(self.browse_output)
-        hl_out = QHBoxLayout()
-        hl_out.addWidget(self.output_edit)
-        hl_out.addWidget(btn_output)
-        form_layout.addRow(QLabel("Output File:"), hl_out)
-
-        # Analyzer combo
-        self.combo_analyzer = QComboBox()
-        self.combo_analyzer.addItems(["IA", "CBC", "CHEM", "Consolidated"])
-        form_layout.addRow(QLabel("Analyzer Mode:"), self.combo_analyzer)
-
-        # Sheet combo
+        # Sheet selection
         self.sheet_combo = QComboBox()
-        form_layout.addRow(QLabel("Excel Sheet:"), self.sheet_combo)
+        file_layout.addRow("Sheet:", self.sheet_combo)
+
+        # Output file selection
+        self.output_edit = QLineEdit()
+        browse_output_btn = QPushButton("Browse")
+        browse_output_btn.clicked.connect(self.browse_output)
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(self.output_edit)
+        output_layout.addWidget(browse_output_btn)
+        file_layout.addRow("Output Excel:", output_layout)
+
+        file_group.setLayout(file_layout)
+        layout.addWidget(file_group)
+
+        # Analysis options group
+        analysis_group = QGroupBox("Analysis Options")
+        analysis_layout = QFormLayout()
+
+        # Analyzer selection
+        self.analyzer_combo = QComboBox()
+        self.analyzer_combo.addItems(["IA", "CBC", "CHEM", "Consolidated"])
+        analysis_layout.addRow("Analyzer:", self.analyzer_combo)
 
         # Region filter
-        self.region_filter_edit = QLineEdit()
-        self.region_filter_edit.setPlaceholderText("Optional region filter...")
-        form_layout.addRow(QLabel("Region Filter:"), self.region_filter_edit)
+        self.region_combo = QComboBox()
+        regions = self.config.config_data.get("metadata", {}).get("regions", ["Region1", "Region2"])  # Default regions if not set
+        self.region_combo.addItems(["All"] + regions)
+        analysis_layout.addRow("Region:", self.region_combo)
 
-        # City/Class check
-        self.checkbox_city = QCheckBox("City Pivot?")
-        self.checkbox_class = QCheckBox("Class Pivot?")
-        form_layout.addRow(self.checkbox_city)
-        form_layout.addRow(self.checkbox_class)
+        # Additional options
+        self.city_check = QCheckBox("Include City Analysis")
+        self.class_check = QCheckBox("Include Class Analysis")
+        self.value_check = QCheckBox("Include Value Analysis")
 
-        # Days spin
-        self.days_label = QLabel("Days per Year:")
-        self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 1000)
-        self.days_spin.setValue(self.config_data.get("days_per_year", 330))
-        form_layout.addRow(self.days_label, self.days_spin)
+        analysis_layout.addRow(self.city_check)
+        analysis_layout.addRow(self.class_check)
+        analysis_layout.addRow(self.value_check)
 
-        main_layout.addLayout(form_layout)
+        analysis_group.setLayout(analysis_layout)
+        layout.addWidget(analysis_group)
 
         # Action buttons
-        hl_bottom = QHBoxLayout()
+        button_layout = QHBoxLayout()
+        process_btn = QPushButton("Process Data")
+        process_btn.clicked.connect(self.process_data)
+        settings_btn = QPushButton("Settings")
+        settings_btn.clicked.connect(self.open_settings)
 
-        btn_settings = QPushButton("Settings")
-        btn_settings.clicked.connect(self.open_settings)
+        button_layout.addWidget(process_btn)
+        button_layout.addWidget(settings_btn)
+        layout.addLayout(button_layout)
 
-        btn_process = QPushButton("Process")
-        btn_process.clicked.connect(self.process_data)
+        return tab
 
-        btn_theme = QPushButton("Toggle Theme")
-        btn_theme.clicked.connect(self.toggle_theme)
+    def create_analysis_tab(self) -> QWidget:
+        """Create the analysis tab with real-time results."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
-        btn_push_git = QPushButton("Push to GitHub")
-        btn_push_git.setToolTip("Commits local changes and pushes to the 'origin' remote in Git repository.")
-        btn_push_git.clicked.connect(self.push_to_github)
+        # Results display area
+        self.results_group = QGroupBox("Analysis Results")
+        results_layout = QVBoxLayout()
 
-        self.dashboard_button = QPushButton("Open Data Visualization Dashboard")
-        self.dashboard_button.clicked.connect(self.open_dashboard)
-        main_layout.addWidget(self.dashboard_button)
+        # Market share results
+        self.volume_results = QLabel("Volume Market Share: Not analyzed yet")
+        self.value_results = QLabel("Value Market Share: Not analyzed yet")
+        self.city_results = QLabel("City Analysis: Not available")
+        self.class_results = QLabel("Class Analysis: Not available")
 
-        hl_bottom.addWidget(btn_settings)
-        hl_bottom.addWidget(btn_process)
-        hl_bottom.addWidget(btn_theme)
-        hl_bottom.addWidget(btn_push_git)
+        results_layout.addWidget(self.volume_results)
+        results_layout.addWidget(self.value_results)
+        results_layout.addWidget(self.city_results)
+        results_layout.addWidget(self.class_results)
 
-        main_layout.addLayout(hl_bottom)
+        self.results_group.setLayout(results_layout)
+        layout.addWidget(self.results_group)
 
-        self.setCentralWidget(widget)
-        self.apply_modern_light_theme()
+        return tab
 
-    def open_dashboard(self):
-            """Launch the modern data analysis dashboard (modern_dashboard.py)."""
-            self.dash_window = ModernDataAnalysisApp()
-            self.dash_window.show()
+    def create_visualization_tab(self) -> QWidget:
+        """Create the visualization tab with charts and graphs."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
-    def open_settings(self):
-        from settings_dialog import SettingsDialog
-        dialog = SettingsDialog(self.config_data, self)
-        if dialog.exec_():
-            self.config_data = load_config()  # reload from file
-            self.days_spin.setValue(self.config_data.get("days_per_year", 330))
-            QMessageBox.information(self, "Settings Saved", "Settings updated successfully.")
+        # Create sub-tabs for different visualizations
+        viz_tabs = QTabWidget()
+
+        # Market Share Charts
+        self.market_share_widget = self.create_market_share_view()
+        viz_tabs.addTab(self.market_share_widget, "Market Share")
+
+        # Regional Analysis
+        self.regional_widget = self.create_regional_view()
+        viz_tabs.addTab(self.regional_widget, "Regional Analysis")
+
+        # Trend Analysis
+        self.trend_widget = self.create_trend_view()
+        viz_tabs.addTab(self.trend_widget, "Trends")
+
+        layout.addWidget(viz_tabs)
+        return tab
 
     def browse_input(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Input Excel", "", "Excel Files (*.xlsx *.xls)")
-        if path:
-            self.input_file = path
-            self.input_edit.setText(path)
-            sheets = load_sheet_names(path)
-            self.sheet_combo.clear()
-            self.sheet_combo.addItems(sheets)
+        """Handle browsing and selecting the input Excel file."""
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Input Excel File",
+                "",
+                "Excel Files (*.xlsx *.xls)"
+            )
+            if path:
+                self.input_edit.setText(path)
+                sheets = load_sheet_names(path)
+                self.sheet_combo.clear()
+                self.sheet_combo.addItems(sheets)
+                logger.info(f"Selected input file: {path}")
+        except Exception as e:
+            logger.error(f"Error browsing input file: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to select input file:\n{str(e)}")
 
     def browse_output(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Select Output Excel", "", "Excel Files (*.xlsx *.xls)")
-        if path:
-            self.output_file = path
-            self.output_edit.setText(path)
+        """Handle browsing and selecting the output Excel file."""
+        try:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Select Output Excel File",
+                "",
+                "Excel Files (*.xlsx *.xls)"
+            )
+            if path:
+                self.output_edit.setText(path)
+                logger.info(f"Selected output file: {path}")
+        except Exception as e:
+            logger.error(f"Error browsing output file: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to select output file:\n{str(e)}")
 
     def process_data(self):
-        if not self.input_edit.text() or not self.output_edit.text():
-            QMessageBox.warning(self, "Error", "Please select input and output files.")
-            return
-
-        chosen_sheet = self.sheet_combo.currentText()
-        if not chosen_sheet:
-            QMessageBox.warning(self, "Error", "Please pick a valid sheet.")
-            return
-
-        region_filter = self.region_filter_edit.text().strip()
-        days_per_year = self.days_spin.value()
-        self.config_data["days_per_year"] = days_per_year
-
-        # Load data
+        """Process the input data and update results."""
         try:
-            df = load_data(self.input_edit.text(), chosen_sheet)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-            return
+            if not self.validate_inputs():
+                return
 
-        # Region filter
-        if region_filter:
-            if "Region" not in df.columns:
-                QMessageBox.warning(self, "Warning", "No 'Region' column in data.")
+            self.statusBar().showMessage("Processing data...")
+
+            # Read input data
+            df = self.read_input_data()
+            if df is None:
+                return
+
+            # Apply filters
+            df = self.apply_filters(df)
+
+            # Process based on analyzer type
+            analyzer_type = self.analyzer_combo.currentText()
+            if analyzer_type == "Consolidated":
+                self.process_consolidated(df)
             else:
-                old_len = len(df)
-                df = df[df["Region"] == region_filter]
-                logger.info(f"Region filter '{region_filter}': {old_len} -> {len(df)} rows")
+                self.process_single_analyzer(df, analyzer_type)
 
-        analyzer_mode = self.combo_analyzer.currentText()
-        if analyzer_mode == "Consolidated":
-            self.process_consolidated(df, days_per_year)
-        else:
-            self.process_single_analyzer(df, analyzer_mode, days_per_year)
+            self.statusBar().showMessage("Processing complete", 5000)
 
-    def process_single_analyzer(self, df, analyzer_mode, days_per_year):
-        brand_cols = self.config_data["headers"][analyzer_mode]["brand_cols"]
-        workload_cols = self.config_data["headers"][analyzer_mode]["workload_cols"]
-
-        missing = check_missing_columns(df, brand_cols + workload_cols)
-        if missing:
-            QMessageBox.critical(self, "Missing Cols", f"Missing columns for {analyzer_mode}:\n{missing}")
-            return
-
-        # 1) volume aggregator
-        brand_totals = aggregate_analyzer(df, brand_cols, workload_cols, days_per_year)
-        if not brand_totals:
-            QMessageBox.information(self, "No Data", f"No valid data for {analyzer_mode}")
-            return
-        market_share = calculate_market_share(brand_totals)
-
-        # 2) value aggregator (cost-based)
-        cost_per_test = float(self.config_data["cost_per_test"].get(analyzer_mode, 0))
-        brand_values = {b: (brand_totals[b] * cost_per_test) for b in brand_totals}
-        market_share_value = calculate_market_share(brand_values)
-
-        # city/class pivot (volume-based)
-        df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_city.isChecked() else None
-        df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_class.isChecked() else None
-
-        # Make a combined single sheet with columns for volume & share, plus value & share
-        # Brand, Volume, VolumeShare, Value, ValueShare
-        df_combined = self.build_combined_df(brand_totals, market_share, brand_values, market_share_value)
-
-        # Now save everything to just 1 sheet for the analyzer + optional pivot sheets
-        self.save_results_one_sheet(analyzer_mode, df_combined, df_city, df_class)
-
-        # Show summary
-        top_brand = max(market_share, key=market_share.get) if market_share else None
-        sites = df["Customer Name"].nunique() if "Customer Name" in df.columns else len(df)
-        msg = f"{analyzer_mode} done.\n"
-        if top_brand:
-            msg += f"Top brand (Volume): {top_brand} => {market_share[top_brand]:.1f}%\n"
-        if market_share_value:
-            top_brand_val = max(market_share_value, key=market_share_value.get)
-            msg += f"Top brand (Value): {top_brand_val} => {market_share_value[top_brand_val]:.1f}%\n"
-        msg += f"Sites processed: {sites}"
-        QMessageBox.information(self, "Done", msg)
-
-    def process_consolidated(self, df, days_per_year):
-        """
-        For each analyzer, compute volume & value, but store each in a single sheet
-        e.g. 'IA', 'CBC', 'CHEM'. Optionally city/class pivot in separate sheets if needed.
-        """
-        for mode in ["IA", "CBC", "CHEM"]:
-            brand_cols = self.config_data["headers"][mode]["brand_cols"]
-            workload_cols = self.config_data["headers"][mode]["workload_cols"]
-
-            missing = check_missing_columns(df, brand_cols + workload_cols)
-            if missing:
-                logger.warning(f"Skipping {mode}, missing columns: {missing}")
-                continue
-
-            brand_totals = aggregate_analyzer(df, brand_cols, workload_cols, days_per_year)
-            if not brand_totals:
-                logger.info(f"No data for {mode}, skipping.")
-                continue
-            market_share = calculate_market_share(brand_totals)
-
-            cost_per_test = float(self.config_data["cost_per_test"].get(mode, 0))
-            brand_values = {b: (brand_totals[b] * cost_per_test) for b in brand_totals}
-            market_share_value = calculate_market_share(brand_values)
-
-            df_city = city_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_city.isChecked() else None
-            df_class = class_pivot_advanced(df, brand_cols, workload_cols, days_per_year) if self.checkbox_class.isChecked() else None
-
-            df_combined = self.build_combined_df(brand_totals, market_share, brand_values, market_share_value)
-
-            self.save_results_one_sheet(mode, df_combined, df_city, df_class)
-
-        sites = df["Customer Name"].nunique() if "Customer Name" in df.columns else len(df)
-        QMessageBox.information(self, "Done", f"Consolidated run done. Sites processed: {sites}")
-
-    def build_combined_df(self, brand_totals, market_share, brand_values, market_share_value):
-        """
-        Merge volume totals & shares with value totals & shares into a single DataFrame
-        with columns: Brand, Volume, VolumeShare, Value, ValueShare
-        """
-
-        # Convert dict -> DataFrame
-        df_vol = pd.DataFrame(list(brand_totals.items()), columns=["Brand", "Volume"])
-        df_vol_share = pd.DataFrame(list(market_share.items()), columns=["Brand", "VolumeShare"])
-
-        df_val = pd.DataFrame(list(brand_values.items()), columns=["Brand", "Value"])
-        df_val_share = pd.DataFrame(list(market_share_value.items()), columns=["Brand", "ValueShare"])
-
-        # Merge them all on Brand
-        df_merge = pd.merge(df_vol, df_vol_share, on="Brand", how="outer")
-        df_merge = pd.merge(df_merge, df_val, on="Brand", how="outer")
-        df_merge = pd.merge(df_merge, df_val_share, on="Brand", how="outer")
-
-        # Round columns if needed
-        df_merge["Volume"] = df_merge["Volume"].round(1)
-        df_merge["VolumeShare"] = df_merge["VolumeShare"].round(1)
-        df_merge["Value"] = df_merge["Value"].round(1)
-        df_merge["ValueShare"] = df_merge["ValueShare"].round(1)
-
-        return df_merge
-
-    def save_results_one_sheet(self, analyzer_mode, df_combined, df_city, df_class):
-        """
-        Writes a single sheet named e.g. 'IA' for volume+value results,
-        plus optional 'IA_CityPivot', 'IA_ClassPivot' for pivot data.
-        """
-        from openpyxl.utils.exceptions import InvalidFileException
-        from openpyxl import load_workbook
-
-        sheet_base = analyzer_mode.upper()
-        output_path = self.output_edit.text()
-
-        if os.path.exists(output_path):
-            try:
-                with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                    df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
-
-                    if df_city is not None:
-                        df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
-                    if df_class is not None:
-                        df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
-            except InvalidFileException:
-                with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                    df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
-
-                    if df_city is not None:
-                        df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
-                    if df_class is not None:
-                        df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
-        else:
-            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                df_combined.to_excel(writer, sheet_name=sheet_base, index=False)
-                if df_city is not None:
-                    df_city.to_excel(writer, sheet_name=f"{sheet_base}_CityPivot", index=False)
-                if df_class is not None:
-                    df_class.to_excel(writer, sheet_name=f"{sheet_base}_ClassPivot", index=False)
-
-    def toggle_theme(self):
-        if not hasattr(self, 'dark_mode'):
-            self.dark_mode = False
-        if not self.dark_mode:
-            self.apply_modern_dark_theme()
-            self.dark_mode = True
-        else:
-            self.apply_modern_light_theme()
-            self.dark_mode = False
-
-    def apply_modern_light_theme(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #fafafa;
-            }
-            QLabel {
-                color: #333333;
-                font: 13px 'Segoe UI';
-            }
-            QLineEdit, QCheckBox, QComboBox, QSpinBox {
-                color: #333333;
-                background-color: #ffffff;
-                border: 1px solid #cccccc;
-                font: 12px 'Segoe UI';
-            }
-            QPushButton {
-                color: #333333;
-                background-color: #e0f7fa;
-                border: 1px solid #b2ebf2;
-                padding: 5px;
-                font: bold 12px 'Segoe UI';
-            }
-            QPushButton:hover {
-                background-color: #b2ebf2;
-                border: 1px solid #80deea;
-            }
-        """)
-
-    def apply_modern_dark_theme(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #303030;
-            }
-            QLabel {
-                color: #ffffff;
-                font: 13px 'Segoe UI';
-            }
-            QLineEdit, QCheckBox, QComboBox, QSpinBox {
-                color: #ffffff;
-                background-color: #424242;
-                border: 1px solid #666666;
-                font: 12px 'Segoe UI';
-            }
-            QPushButton {
-                color: #ffffff;
-                background-color: #006064;
-                border: 1px solid #004d40;
-                padding: 5px;
-                font: bold 12px 'Segoe UI';
-            }
-            QPushButton:hover {
-                background-color: #00838f;
-                border: 1px solid #006064;
-            }
-        """)
-
-    def push_to_github(self):
-        commit_msg, ok = QInputDialog.getText(
-            self,
-            "Commit Message",
-            "Enter commit message:"
-        )
-        if not ok or not commit_msg.strip():
-            QMessageBox.information(self, "No Commit", "Commit canceled (no message).")
-            return
-
-        project_dir = os.path.dirname(__file__)
-
-        try:
-            subprocess.run(["git", "add", "."], cwd=project_dir, check=True)
-            subprocess.run(["git", "commit", "-m", commit_msg.strip()], cwd=project_dir, check=True)
-            subprocess.run(["git", "push", "origin", "main"], cwd=project_dir, check=True)
-            QMessageBox.information(self, "Git", "Changes pushed to GitHub successfully!")
-        except subprocess.CalledProcessError as e:
-            logger.exception("Git command failed")
-            QMessageBox.critical(self, "Git Error", f"Git command failed:\n{str(e)}")
         except Exception as e:
-            logger.exception("Unexpected error with Git push")
-            QMessageBox.critical(self, "Git Error", f"Unexpected error:\n{str(e)}")
+            logger.error(f"Error processing data: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error processing data: {str(e)}")
+            self.statusBar().showMessage("Processing failed")
+
+    def process_single_analyzer(self, df: pd.DataFrame, analyzer_type: str):
+        """Process data for a single analyzer type."""
+        try:
+            # Get analysis results
+            results = WorkingAggregator.analyze_market_data(
+                df=df,
+                config=self.config.config_data,
+                analyzer_type=analyzer_type
+            )
+
+            # Store the latest results
+            self.latest_results = results
+
+            # Update results display
+            self.update_results_display(results, analyzer_type)
+
+            # Save results
+            self.save_results(results, analyzer_type)
+
+            # Update visualizations
+            self.update_visualizations(results, analyzer_type)
+
+        except Exception as e:
+            logger.error(f"Error processing {analyzer_type}: {str(e)}")
+            raise
+
+    def process_consolidated(self, df: pd.DataFrame):
+        """Process data in consolidated mode for all analyzers."""
+        try:
+            for analyzer_type in ["IA", "CBC", "CHEM"]:
+                results = WorkingAggregator.analyze_market_data(
+                    df=df,
+                    config=self.config.config_data,
+                    analyzer_type=analyzer_type
+                )
+
+                if results is None:
+                    logger.warning(f"No results for analyzer type: {analyzer_type}")
+                    continue
+
+                # Store the latest results (can be overwritten; consider storing separately if needed)
+                self.latest_results = results
+
+                # Update results display
+                self.update_results_display(results, analyzer_type)
+
+                # Save results
+                self.save_results(results, analyzer_type)
+
+                # Update visualizations
+                self.update_visualizations(results, analyzer_type)
+
+            QMessageBox.information(self, "Processing Complete", "Consolidated processing completed successfully.")
+
+        except Exception as e:
+            logger.error(f"Error in consolidated processing: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error in consolidated processing: {str(e)}")
+
+    def update_results_display(self, results: AnalysisResult, analyzer_type: str):
+        """Update the GUI with analysis results."""
+        # Update volume market share
+        volume_text = f"Volume Market Share ({analyzer_type}):\n"
+        for brand, share in results.market_share.items():
+            volume_text += f"{brand}: {share:.1f}%\n"
+        self.volume_results.setText(volume_text)
+
+        # Update value market share if available
+        if results.brand_values:
+            value_text = f"Value Market Share ({analyzer_type}):\n"
+            value_share = WorkingAggregator.calculate_market_share(results.brand_values)
+            for brand, share in value_share.items():
+                value_text += f"{brand}: {share:.1f}%\n"
+            self.value_results.setText(value_text)
+        else:
+            self.value_results.setText("Value Market Share: Not analyzed")
+
+        # Update pivot analysis results
+        if results.city_pivot is not None:
+            self.city_results.setText("City Analysis: Available (see visualizations)")
+        else:
+            self.city_results.setText("City Analysis: Not included")
+
+        if results.class_pivot is not None:
+            self.class_results.setText("Class Analysis: Available (see visualizations)")
+        else:
+            self.class_results.setText("Class Analysis: Not included")
+
+    def update_visualizations(self, results: AnalysisResult, analyzer_type: str):
+        """Update visualization charts with new data."""
+        # Update Market Share Chart
+        self.update_market_share_chart(results, analyzer_type)
+
+        # Update Regional Analysis Chart
+        if self.city_check.isChecked() and results.city_pivot is not None:
+            self.update_regional_chart(results.city_pivot, "City")
+        if self.class_check.isChecked() and results.class_pivot is not None:
+            self.update_regional_chart(results.class_pivot, "Class")
+
+    def update_market_share_chart(self, results: AnalysisResult, analyzer_type: str):
+        """Update the market share pie chart."""
+        self.clear_layout(self.market_share_layout)
+
+        # Volume Market Share
+        if self.show_volume.isChecked() and results.market_share:
+            fig1, ax1 = plt.subplots(figsize=(6, 6))
+            brands = list(results.market_share.keys())
+            shares = list(results.market_share.values())
+            ax1.pie(shares, labels=brands, autopct='%1.1f%%', startangle=140)
+            ax1.set_title(f'{analyzer_type} Volume Market Share')
+            canvas1 = FigureCanvas(fig1)
+            self.market_share_layout.addWidget(canvas1)
+
+        # Value Market Share
+        if self.show_value.isChecked() and results.brand_values:
+            value_share = WorkingAggregator.calculate_market_share(results.brand_values)
+            if value_share:
+                fig2, ax2 = plt.subplots(figsize=(6, 6))
+                brands = list(value_share.keys())
+                shares = list(value_share.values())
+                ax2.pie(shares, labels=brands, autopct='%1.1f%%', startangle=140)
+                ax2.set_title(f'{analyzer_type} Value Market Share')
+                canvas2 = FigureCanvas(fig2)
+                self.market_share_layout.addWidget(canvas2)
+
+        plt.close('all')
+
+    def create_market_share_view(self) -> QWidget:
+        """Create the market share visualization widget."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Add chart options
+        options_group = QGroupBox("Display Options")
+        options_layout = QHBoxLayout()
+
+        self.show_volume = QCheckBox("Volume Share")
+        self.show_volume.setChecked(True)
+        self.show_volume.stateChanged.connect(self.toggle_market_share_visibility)
+        self.show_value = QCheckBox("Value Share")
+        self.show_value.setChecked(True)
+        self.show_value.stateChanged.connect(self.toggle_market_share_visibility)
+
+        options_layout.addWidget(self.show_volume)
+        options_layout.addWidget(self.show_value)
+        options_group.setLayout(options_layout)
+
+        layout.addWidget(options_group)
+
+        # Placeholder for charts
+        self.market_share_chart_area = QWidget()
+        self.market_share_layout = QVBoxLayout(self.market_share_chart_area)
+        layout.addWidget(self.market_share_chart_area)
+
+        return widget
+
+    def create_regional_view(self) -> QWidget:
+        """Create the regional analysis visualization widget."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Analysis type selection
+        analysis_group = QGroupBox("Regional Analysis Options")
+        analysis_layout = QFormLayout()
+
+        self.regional_analysis_combo = QComboBox()
+        self.regional_analysis_combo.addItems(['City Analysis', 'Class Analysis'])
+        self.regional_analysis_combo.currentTextChanged.connect(self.update_regional_chart_view)
+
+        analysis_layout.addRow("Analysis Type:", self.regional_analysis_combo)
+        analysis_group.setLayout(analysis_layout)
+
+        layout.addWidget(analysis_group)
+
+        # Placeholder for regional chart
+        self.regional_chart_area = QWidget()
+        self.regional_chart_layout = QVBoxLayout(self.regional_chart_area)
+        layout.addWidget(self.regional_chart_area)
+
+        return tab
+
+    def create_trend_view(self) -> QWidget:
+        """Create the trend analysis visualization widget."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Trend options
+        trend_group = QGroupBox("Trend Analysis Options")
+        trend_layout = QFormLayout()
+
+        self.trend_type_combo = QComboBox()
+        self.trend_type_combo.addItems(['Monthly', 'Quarterly', 'Yearly'])
+        self.trend_type_combo.currentTextChanged.connect(self.update_trend_chart)
+
+        trend_layout.addRow("Time Period:", self.trend_type_combo)
+        trend_group.setLayout(trend_layout)
+        layout.addWidget(trend_group)
+
+        # Placeholder for trend chart
+        self.trend_chart_area = QWidget()
+        self.trend_chart_layout = QVBoxLayout(self.trend_chart_area)
+        layout.addWidget(self.trend_chart_area)
+
+        return tab
+
+    def validate_inputs(self) -> bool:
+        """Validate all input parameters before processing."""
+        if not self.input_edit.text():
+            QMessageBox.warning(self, "Validation Error", "Please select an input file")
+            return False
+
+        if not self.output_edit.text():
+            QMessageBox.warning(self, "Validation Error", "Please select an output file")
+            return False
+
+        if not self.sheet_combo.currentText():
+            QMessageBox.warning(self, "Validation Error", "Please select a worksheet")
+            return False
+
+        return True
+
+    def read_input_data(self) -> Optional[pd.DataFrame]:
+        """Read and validate input Excel file."""
+        try:
+            df = pd.read_excel(
+                self.input_edit.text(),
+                sheet_name=self.sheet_combo.currentText()
+            )
+
+            # Replace null values
+            df = df.replace(["NILL", "Nill", "nill", "NIL"], np.nan)
+
+            return df
+
+        except Exception as e:
+            logger.error(f"Error reading input file: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to read input file: {str(e)}")
+            return None
+
+    def apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply selected filters to the dataset."""
+        # Region filter
+        selected_region = self.region_combo.currentText()
+        if selected_region != "All" and "Region" in df.columns:
+            df = df[df["Region"] == selected_region]
+
+        return df
+
+    def clear_layout(self, layout):
+        """Clear all widgets from a layout."""
+        if layout is not None:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+    def apply_modern_style(self):
+        """Apply modern styling to the application."""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f0f2f5;
+            }
+            QTabWidget::pane {
+                border: 1px solid #cccccc;
+                background: white;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background: #e0e0e0;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background: white;
+                border-bottom: none;
+            }
+            QPushButton {
+                background-color: #1976d2;
+                color: white;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+            }
+            QGroupBox {
+                background-color: white;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                margin-top: 1em;
+                padding-top: 1em;
+            }
+            QLineEdit, QComboBox {
+                padding: 6px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+            }
+        """)
+
+    def toggle_market_share_visibility(self):
+        """Toggle the visibility of volume and value market share charts."""
+        if self.latest_results:
+            self.update_market_share_chart(self.latest_results, self.analyzer_combo.currentText())
+        else:
+            QMessageBox.warning(self, "No Data", "Please process data before toggling visualization options.")
+
+    def update_regional_chart_view(self, analysis_type: str):
+        """Update the regional analysis chart based on selected type."""
+        self.clear_layout(self.regional_chart_layout)
+
+        if not self.latest_results:
+            QMessageBox.warning(self, "No Data", "Please process data before viewing visualizations.")
+            return
+
+        if analysis_type == 'City Analysis':
+            if self.latest_results.city_pivot is not None and not self.latest_results.city_pivot.empty:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                self.latest_results.city_pivot.plot(kind='bar', ax=ax)
+                ax.set_title('City Analysis Distribution')
+                ax.set_xlabel('City')
+                ax.set_ylabel('Allocated Yearly')
+                plt.tight_layout()
+                canvas = FigureCanvas(fig)
+                self.regional_chart_layout.addWidget(canvas)
+                plt.close('all')
+            else:
+                self.regional_chart_layout.addWidget(QLabel("No City Analysis data available."))
+        elif analysis_type == 'Class Analysis':
+            if self.latest_results.class_pivot is not None and not self.latest_results.class_pivot.empty:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                self.latest_results.class_pivot.plot(kind='bar', ax=ax)
+                ax.set_title('Class Analysis Distribution')
+                ax.set_xlabel('Class')
+                ax.set_ylabel('Allocated Yearly')
+                plt.tight_layout()
+                canvas = FigureCanvas(fig)
+                self.regional_chart_layout.addWidget(canvas)
+                plt.close('all')
+            else:
+                self.regional_chart_layout.addWidget(QLabel("No Class Analysis data available."))
+
+    def update_trend_chart(self):
+        """Update the trend analysis chart based on selected time period."""
+        self.clear_layout(self.trend_chart_layout)
+        # Implement trend analysis visualization based on 'self.latest_results'
+        if not self.latest_results:
+            QMessageBox.warning(self, "No Data", "Please process data before viewing trend visualizations.")
+            return
+
+        # Placeholder implementation
+        trend_type = self.trend_type_combo.currentText()
+        if trend_type == 'Monthly':
+            # Implement monthly trend analysis
+            QMessageBox.information(self, "Info", "Monthly Trend Analysis not implemented yet.")
+        elif trend_type == 'Quarterly':
+            # Implement quarterly trend analysis
+            QMessageBox.information(self, "Info", "Quarterly Trend Analysis not implemented yet.")
+        elif trend_type == 'Yearly':
+            # Implement yearly trend analysis
+            QMessageBox.information(self, "Info", "Yearly Trend Analysis not implemented yet.")
+
+    def save_results(self, results: AnalysisResult, analyzer_type: str):
+        """Save the analysis results to the output Excel file."""
+        try:
+            output_path = self.output_edit.text()
+            aggregator = WorkingAggregator()
+            aggregator.save_analysis_results(results, output_path, analyzer_type)
+            logger.info(f"Results saved to {output_path}")
+            QMessageBox.information(self, "Success", f"Results saved to {output_path}")
+        except Exception as e:
+            logger.error(f"Error saving results: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to save results:\n{str(e)}")
+
+    def open_settings(self):
+        """Open the settings dialog."""
+        # Implement your settings dialog logic here
+        QMessageBox.information(self, "Settings", "Settings dialog not implemented yet.")
 
 def main():
     print("DEBUG: About to create QApplication")
-    logging.info("Launching Multi-Analyzer with Configurable Headers + Git Integration.")
+    logging.info("Launching Market Share Analysis Tool.")
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = ModernMarketAnalyzer()
     window.show()
     sys.exit(app.exec_())
 

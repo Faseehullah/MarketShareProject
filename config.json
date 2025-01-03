@@ -1,5 +1,5 @@
 {
-  "days_per_year": 330,
+  "days_per_year": 350,
   "headers": {
     "IA": {
       "brand_cols": [
@@ -43,8 +43,8 @@
     }
   },
   "cost_per_test": {
-    "IA": 100,
-    "CBC": 80,
-    "CHEM": 120
+    "IA": 250,
+    "CBC": 120,
+    "CHEM": 160
   }
 }

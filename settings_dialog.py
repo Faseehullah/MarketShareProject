@@ -1,117 +1,135 @@
-import logging
+# settings_dialog.py
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFormLayout, QSpinBox, QMessageBox
+    QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
+    QLabel, QLineEdit, QPushButton, QFormLayout, QSpinBox,
+    QDoubleSpinBox, QGroupBox, QMessageBox, QScrollArea
 )
 from PyQt5.QtCore import Qt
-from config import ConfigManager, ConfigurationError
+from typing import Dict, List
 
-logger = logging.getLogger(__name__)
+class AnalyzerSettingsGroup(QGroupBox):
+    """Group box for analyzer-specific settings."""
+    def __init__(self, analyzer_type: str, config: Dict, parent=None):
+        super().__init__(f"{analyzer_type} Settings", parent)
+        self.analyzer_type = analyzer_type
+        self.config = config
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QFormLayout()
+
+        # Brand columns
+        self.brand_inputs = []
+        for i in range(4):  # Maximum 4 brands
+            line_edit = QLineEdit()
+            if i < len(self.config["brand_columns"]):
+                line_edit.setText(self.config["brand_columns"][i])
+            self.brand_inputs.append(line_edit)
+            layout.addRow(f"Brand {i+1}:", line_edit)
+
+        # Test price
+        self.price_spin = QDoubleSpinBox()
+        self.price_spin.setRange(0, 10000)
+        self.price_spin.setValue(self.config.get("test_price", 0))
+        layout.addRow("Test Price:", self.price_spin)
+
+        self.setLayout(layout)
+
+    def get_settings(self) -> Dict:
+        """Get current settings from the group."""
+        return {
+            "brand_columns": [edit.text() for edit in self.brand_inputs if edit.text()],
+            "test_price": self.price_spin.value()
+        }
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, config_manager, parent=None):
         super().__init__(parent)
-        self.config_manager = ConfigManager()
-        self.config_data = self.config_manager.get_config()
-        self.setup_ui()
+        self.config_manager = config_manager
+        self.analyzer_groups = {}
+        self.init_ui()
 
-    def setup_ui(self):
-        """Initialize and setup the user interface."""
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(400)
+    def init_ui(self):
+        self.setWindowTitle("Market Analysis Settings")
+        self.setMinimumWidth(800)
+        self.setMinimumHeight(600)
 
-        main_layout = QVBoxLayout()
-        form_layout = self.create_form_layout()
-        button_layout = self.create_button_layout()
+        layout = QVBoxLayout(self)
 
-        main_layout.addLayout(form_layout)
-        main_layout.addLayout(button_layout)
-        self.setLayout(main_layout)
+        # Create tab widget
+        tab_widget = QTabWidget()
 
-    def create_form_layout(self):
-        """Create and return the form layout with all input fields."""
-        form = QFormLayout()
+        # Analyzers tab
+        analyzer_tab = self.create_analyzer_tab()
+        tab_widget.addTab(analyzer_tab, "Analyzers")
 
-        # Create department input fields
-        self.department_fields = {}
-        for department in ["IA", "CBC", "CHEM"]:
-            fields = self.create_department_fields(department)
-            self.department_fields[department] = fields
-            form.addRow(QLabel(f"{department} brand cols:"), fields['brand'])
-            form.addRow(QLabel(f"{department} workload cols:"), fields['workload'])
+        # General settings tab
+        general_tab = self.create_general_tab()
+        tab_widget.addTab(general_tab, "General Settings")
 
-        # Days per year spinner
-        self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 1000)
-        self.days_spin.setValue(self.config_manager.get_days_per_year())
-        form.addRow(QLabel("Days per Year:"), self.days_spin)
+        # Add tabs to layout
+        layout.addWidget(tab_widget)
 
-        return form
-
-    def create_department_fields(self, department):
-        """Create and initialize input fields for a department."""
-        brand_cols = self.config_manager.get_brand_columns(department)
-        workload_cols = self.config_manager.get_workload_columns(department)
-
-        brand_edit = QLineEdit(", ".join(brand_cols))
-        workload_edit = QLineEdit(", ".join(workload_cols))
-
-        brand_edit.setToolTip("Enter comma-separated column names")
-        workload_edit.setToolTip("Enter comma-separated column names")
-
-        return {'brand': brand_edit, 'workload': workload_edit}
-
-    def create_button_layout(self):
-        """Create and return the button layout."""
+        # Buttons
         button_layout = QHBoxLayout()
-
         save_button = QPushButton("Save")
         save_button.clicked.connect(self.save_settings)
-        save_button.setDefault(True)
-
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
 
         button_layout.addWidget(save_button)
         button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
 
-        return button_layout
+    def create_analyzer_tab(self) -> QWidget:
+        """Create the analyzers configuration tab."""
+        scroll = QScrollArea()
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
 
-    def validate_inputs(self):
-        """Validate user inputs before saving."""
-        for department, fields in self.department_fields.items():
-            brand_cols = [x.strip() for x in fields['brand'].text().split(",") if x.strip()]
-            workload_cols = [x.strip() for x in fields['workload'].text().split(",") if x.strip()]
+        for analyzer_type, config in self.config_manager.config_data["analyzers"].items():
+            group = AnalyzerSettingsGroup(analyzer_type, config)
+            self.analyzer_groups[analyzer_type] = group
+            layout.addWidget(group)
 
-            if len(brand_cols) != len(workload_cols):
-                raise ValueError(
-                    f"{department}: Number of brand columns ({len(brand_cols)}) "
-                    f"does not match workload columns ({len(workload_cols)})"
-                )
+        scroll.setWidget(widget)
+        scroll.setWidgetResizable(True)
+        return scroll
 
-            if not brand_cols or not workload_cols:
-                raise ValueError(f"{department}: Brand and workload columns cannot be empty")
+    def create_general_tab(self) -> QWidget:
+        """Create the general settings tab."""
+        widget = QWidget()
+        layout = QFormLayout(widget)
+
+        # Days per year setting
+        self.days_spin = QSpinBox()
+        self.days_spin.setRange(1, 366)
+        self.days_spin.setValue(
+            self.config_manager.config_data["analysis_settings"].get("days_per_year", 330)
+        )
+        layout.addRow("Days per Year:", self.days_spin)
+
+        # Additional settings can be added here
+
+        return widget
 
     def save_settings(self):
-        """Save the configuration if valid."""
+        """Save all settings to configuration."""
         try:
-            self.validate_inputs()
+            # Update analyzer settings
+            for analyzer_type, group in self.analyzer_groups.items():
+                self.config_manager.config_data["analyzers"][analyzer_type].update(
+                    group.get_settings()
+                )
 
-            # Update configuration data
-            for department, fields in self.department_fields.items():
-                brand_cols = [x.strip() for x in fields['brand'].text().split(",") if x.strip()]
-                workload_cols = [x.strip() for x in fields['workload'].text().split(",") if x.strip()]
+            # Update general settings
+            self.config_manager.config_data["analysis_settings"]["days_per_year"] = self.days_spin.value()
 
-                self.config_data["headers"][department]["brand_cols"] = brand_cols
-                self.config_data["headers"][department]["workload_cols"] = workload_cols
+            # Save to file
+            self.config_manager.save_config()
 
-            self.config_data["days_per_year"] = self.days_spin.value()
-
-            # Save configuration
-            self.config_manager.save_config(self.config_data)
             QMessageBox.information(self, "Success", "Settings saved successfully")
             self.accept()
 
-        except (ValueError, ConfigurationError) as e:
-            QMessageBox.critical(self, "Error", str(e))
-            logger.error(f"Settings validation failed: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save settings: {str(e)}")
