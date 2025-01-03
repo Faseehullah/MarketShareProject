@@ -69,4 +69,8 @@ MarketShareProject/
 │   └── LastWorkings/           # Previous versions directory
 ├── .gitignore                  # Git ignore file
 ├── README.md                   # Project documentation
-└── marketsurvey.bat            # Startup script
+|── marketsurvey.bat            # Startup script
+├── tests/
+│   ├── test_aggregator.py
+│   └── test_config.py
+└── requirements.txt
