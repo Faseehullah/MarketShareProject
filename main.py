@@ -203,7 +203,7 @@ class ModernMarketAnalyzer(QMainWindow, MarketAnalysisUI):
 
         self.region_combo = QComboBox()
         # Fetch regions from configuration if available
-        regions = self.config.config_data.get("metadata", {}).get("regions", ["Region1", "Region2"])  # Default regions if not set
+        regions = self.config.config_data.get("metadata", {}).get("regions", ["SOUTH", "CENTRAL", "NORTH", "KPK"])  # Default regions if not set
         self.region_combo.addItems(["All"] + regions)
         analysis_layout.addRow("Region:", self.region_combo)
 
