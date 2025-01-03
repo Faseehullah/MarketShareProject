@@ -32,7 +32,8 @@ class MarketShareVisualizer:
         self,
         data: Dict[str, float],
         title: str = "Market Share Distribution",
-        explode_first: bool = True
+        explode_first: bool = True,
+        show_values: bool = False  # New parameter to toggle showing actual values
     ) -> Optional[FigureCanvas]:
         """
         Create a pie chart for market share visualization.
@@ -41,6 +42,7 @@ class MarketShareVisualizer:
             data (Dict[str, float]): Dictionary with brand names as keys and their market shares as values.
             title (str): Title of the pie chart.
             explode_first (bool): Whether to explode the first slice for emphasis.
+            show_values (bool): Whether to display actual values instead of percentages.
 
         Returns:
             Optional[FigureCanvas]: Matplotlib canvas containing the pie chart or None if data is invalid.
@@ -65,7 +67,7 @@ class MarketShareVisualizer:
         wedges, texts, autotexts = ax.pie(
             sizes,
             labels=labels,
-            autopct='%1.1f%%',
+            autopct='%1.1f%%' if not show_values else None,
             colors=colors,
             explode=explode,
             startangle=140,
@@ -77,8 +79,31 @@ class MarketShareVisualizer:
         ax.set_title(title, fontsize=14, pad=20)
 
         # Enhance text visibility
-        plt.setp(autotexts, size=10, weight="bold")
-        plt.setp(texts, size=10)
+        if not show_values:
+            plt.setp(autotexts, size=10, weight="bold")
+            plt.setp(texts, size=10)
+        else:
+            # Add actual values as annotations
+            for i, (wedge, size) in enumerate(zip(wedges, sizes)):
+                angle = (wedge.theta2 - wedge.theta1) / 2. + wedge.theta1
+                y = np.sin(np.deg2rad(angle))
+                x = np.cos(np.deg2rad(angle))
+                horizontalalignment = 'left' if x > 0 else 'right'
+                connectionstyle = "angle,angleA=0,angleB={}".format(angle)
+                ax.annotate(f'{size:.1f}',
+                            xy=(x, y),
+                            xytext=(1.2 * np.sign(x), 1.2 * y),
+                            horizontalalignment=horizontalalignment,
+                            arrowprops=dict(arrowstyle="-",
+                                            connectionstyle=connectionstyle,
+                                            color='black'))
+
+        # Interactive legend
+        legend = ax.legend(wedges, labels,
+                           title="Brands",
+                           loc="center left",
+                           bbox_to_anchor=(1, 0, 0.5, 1))
+        plt.setp(legend.get_texts(), fontsize='10')
 
         # Create canvas
         canvas = FigureCanvas(fig)
@@ -126,7 +151,7 @@ class MarketShareVisualizer:
 
             # Add value labels on bars
             for index, row in aggregated.iterrows():
-                ax.text(row.name, row[value_col], f'{row[value_col]:.1f}', color='black', ha="center")
+                ax.text(index, row[value_col], f'{row[value_col]:.1f}', color='black', ha="center")
 
         elif kind == "pie":
             fig, ax = plt.subplots(figsize=(8, 8))
