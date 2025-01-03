@@ -55,6 +55,7 @@ MarketShareProject/
 │   ├── __init__.py             # Package initializer
 │   ├── main.py                 # Main application entry
 │   ├── config.py               # Configuration management
+│   ├── config.json             # Setting / configurations
 │   ├── aggregator.py           # Data processing logic
 │   ├── visualization.py        # Visualization tools
 │   ├── modern_ui.py            # Base UI components
@@ -66,11 +67,6 @@ MarketShareProject/
 │   ├── Input Jan 2025/         # Input data directory
 │   ├── Output Jan 2025/        # Output data directory
 │   └── LastWorkings/           # Previous versions directory
-│
-├── tests/                      # Test files
-│   └── __init__.py             # Test package initializer
-│
 ├── .gitignore                  # Git ignore file
 ├── README.md                   # Project documentation
-├── config.json                 # Configuration file
 └── marketsurvey.bat            # Startup script

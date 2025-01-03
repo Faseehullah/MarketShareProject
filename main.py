@@ -1,71 +1,152 @@
-# main.py
+# src/main.py
+
+"""
+Market Share Analysis Tool
+-------------------------
+A comprehensive GUI application for analyzing market share data from Excel files.
+Features include multi-analyzer support, interactive visualizations, and detailed analytics.
+"""
 
 import sys
 import os
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Union
+from pathlib import Path
 
 # Data processing imports
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import seaborn as sns
+from matplotlib.figure import Figure
 
 # PyQt imports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QComboBox, QMessageBox, QLineEdit,
-    QFormLayout, QCheckBox, QSpinBox, QTabWidget, QGroupBox, QScrollArea
+    QFormLayout, QCheckBox, QSpinBox, QTabWidget, QGroupBox, QScrollArea,
+    QSizePolicy, QProgressBar
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QFont, QPalette, QColor, QIntValidator
 
 # Local imports
 from aggregator import WorkingAggregator, AnalysisResult
 from config import MarketAnalysisConfig
+from settings_dialog import SettingsDialog  # Importing the SettingsDialog
 
+# Attempt to import xlsxwriter and handle ImportError gracefully
+try:
+    import xlsxwriter
+except ImportError:
+    xlsxwriter = None  # Will handle this in save_results
+
+# Configure logging
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('market_analysis.log')
+    ]
+)
 
-def load_sheet_names(file_path: str) -> list:
-    """Load and return all sheet names from an Excel file."""
-    try:
-        xls = pd.ExcelFile(file_path)
-        return xls.sheet_names
-    except Exception as e:
-        logger.exception("Error reading sheet names.")
-        QMessageBox.critical(None, "Error", f"Failed to read sheet names: {str(e)}")
-        return []
+class MarketAnalysisUI:
+    """Base class containing shared UI styling and utilities."""
 
-class ModernMarketAnalyzer(QMainWindow):
+    STYLE_SHEET = """
+        QMainWindow {
+            background-color: #f5f6fa;
+        }
+        QTabWidget::pane {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: white;
+        }
+        QPushButton {
+            background-color: #1976d2;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        QPushButton:hover {
+            background-color: #1565c0;
+        }
+        QGroupBox {
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin-top: 12px;
+            padding: 15px;
+        }
+        QLabel {
+            color: #2c3e50;
+            font-size: 13px;
+        }
+        QLineEdit, QComboBox {
+            padding: 6px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            min-height: 25px;
+        }
+    """
+
+    @staticmethod
+    def create_group_box(title: str, layout: Any) -> QGroupBox:
+        """Create a styled group box with the given title and layout."""
+        group = QGroupBox(title)
+        group.setLayout(layout)
+        return group
+
+class FileHandler:
+    """Manages file operations for the Market Share Analysis Tool."""
+
+    @staticmethod
+    def load_excel_sheets(file_path: str) -> List[str]:
+        """Load sheet names from an Excel file."""
+        try:
+            return pd.ExcelFile(file_path).sheet_names
+        except Exception as e:
+            logger.error(f"Error reading Excel sheets: {str(e)}")
+            raise ValueError(f"Failed to read Excel file: {str(e)}")
+
+    @staticmethod
+    def read_excel_data(file_path: str, sheet_name: str) -> pd.DataFrame:
+        """Read and preprocess Excel data."""
+        try:
+            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            return df.replace(["NILL", "Nill", "nill", "NIL", ""], np.nan)
+        except Exception as e:
+            logger.error(f"Error reading Excel data: {str(e)}")
+            raise ValueError(f"Failed to read data: {str(e)}")
+
+class ModernMarketAnalyzer(QMainWindow, MarketAnalysisUI):
+    """Main application window for market share analysis."""
+
     def __init__(self):
         super().__init__()
         self.config = MarketAnalysisConfig()
-        self.setup_logger()
+        self.file_handler = FileHandler()
         self.latest_results: Optional[AnalysisResult] = None  # To store the latest analysis results
         self.init_ui()
 
-    def setup_logger(self):
-        """Configure logging for the application."""
-        logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter(
-            '[%(asctime)s] %(levelname)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
-        logger.addHandler(handler)
-
     def init_ui(self):
-        """Initialize the main user interface."""
+        """Initialize the main user interface components."""
         self.setWindowTitle("Market Share Analysis Tool")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 900)
+        self.setStyleSheet(self.STYLE_SHEET)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
 
-        # Create tabs for different sections
+        # Create main tab widget
         tab_widget = QTabWidget()
         tab_widget.addTab(self.create_input_tab(), "Data Input")
         tab_widget.addTab(self.create_analysis_tab(), "Analysis")
@@ -73,61 +154,60 @@ class ModernMarketAnalyzer(QMainWindow):
 
         main_layout.addWidget(tab_widget)
 
-        # Status bar for feedback
+        # Add progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        main_layout.addWidget(self.progress_bar)
+
+        # Initialize status bar
         self.statusBar().showMessage("Ready")
 
-        self.apply_modern_style()
-
     def create_input_tab(self) -> QWidget:
-        """Create the data input tab."""
+        """Create the data input interface."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        # File selection group
-        file_group = QGroupBox("File Selection")
+        # File selection section
         file_layout = QFormLayout()
 
         # Input file selection
+        input_group = QHBoxLayout()
         self.input_edit = QLineEdit()
         browse_input_btn = QPushButton("Browse")
         browse_input_btn.clicked.connect(self.browse_input)
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(self.input_edit)
-        input_layout.addWidget(browse_input_btn)
-        file_layout.addRow("Input Excel:", input_layout)
+        input_group.addWidget(self.input_edit)
+        input_group.addWidget(browse_input_btn)
+        file_layout.addRow("Input Excel:", input_group)
 
         # Sheet selection
         self.sheet_combo = QComboBox()
         file_layout.addRow("Sheet:", self.sheet_combo)
 
         # Output file selection
+        output_group = QHBoxLayout()
         self.output_edit = QLineEdit()
         browse_output_btn = QPushButton("Browse")
         browse_output_btn.clicked.connect(self.browse_output)
-        output_layout = QHBoxLayout()
-        output_layout.addWidget(self.output_edit)
-        output_layout.addWidget(browse_output_btn)
-        file_layout.addRow("Output Excel:", output_layout)
+        output_group.addWidget(self.output_edit)
+        output_group.addWidget(browse_output_btn)
+        file_layout.addRow("Output Excel:", output_group)
 
-        file_group.setLayout(file_layout)
-        layout.addWidget(file_group)
+        layout.addWidget(self.create_group_box("File Selection", file_layout))
 
-        # Analysis options group
-        analysis_group = QGroupBox("Analysis Options")
+        # Analysis options section
         analysis_layout = QFormLayout()
 
-        # Analyzer selection
         self.analyzer_combo = QComboBox()
         self.analyzer_combo.addItems(["IA", "CBC", "CHEM", "Consolidated"])
         analysis_layout.addRow("Analyzer:", self.analyzer_combo)
 
-        # Region filter
         self.region_combo = QComboBox()
+        # Fetch regions from configuration if available
         regions = self.config.config_data.get("metadata", {}).get("regions", ["Region1", "Region2"])  # Default regions if not set
         self.region_combo.addItems(["All"] + regions)
         analysis_layout.addRow("Region:", self.region_combo)
 
-        # Additional options
+        # Analysis checkboxes
         self.city_check = QCheckBox("Include City Analysis")
         self.class_check = QCheckBox("Include Class Analysis")
         self.value_check = QCheckBox("Include Value Analysis")
@@ -136,8 +216,7 @@ class ModernMarketAnalyzer(QMainWindow):
         analysis_layout.addRow(self.class_check)
         analysis_layout.addRow(self.value_check)
 
-        analysis_group.setLayout(analysis_layout)
-        layout.addWidget(analysis_group)
+        layout.addWidget(self.create_group_box("Analysis Options", analysis_layout))
 
         # Action buttons
         button_layout = QHBoxLayout()
@@ -153,47 +232,57 @@ class ModernMarketAnalyzer(QMainWindow):
         return tab
 
     def create_analysis_tab(self) -> QWidget:
-        """Create the analysis tab with real-time results."""
+        """Create the analysis results interface with real-time updates."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        # Results display area
-        self.results_group = QGroupBox("Analysis Results")
+        # Results overview section
+        results_group = QGroupBox("Analysis Results")
         results_layout = QVBoxLayout()
 
         # Market share results
-        self.volume_results = QLabel("Volume Market Share: Not analyzed yet")
-        self.value_results = QLabel("Value Market Share: Not analyzed yet")
+        self.volume_results = QLabel("Volume Market Share: Awaiting analysis")
+        self.value_results = QLabel("Value Market Share: Awaiting analysis")
         self.city_results = QLabel("City Analysis: Not available")
         self.class_results = QLabel("Class Analysis: Not available")
 
-        results_layout.addWidget(self.volume_results)
-        results_layout.addWidget(self.value_results)
-        results_layout.addWidget(self.city_results)
-        results_layout.addWidget(self.class_results)
+        for label in [self.volume_results, self.value_results,
+                     self.city_results, self.class_results]:
+            label.setWordWrap(True)
+            results_layout.addWidget(label)
 
-        self.results_group.setLayout(results_layout)
-        layout.addWidget(self.results_group)
+        results_group.setLayout(results_layout)
+        layout.addWidget(results_group)
+
+        # Detailed metrics section
+        metrics_group = QGroupBox("Detailed Metrics")
+        metrics_layout = QVBoxLayout()
+
+        self.metrics_display = QLabel("Detailed metrics will appear here after analysis")
+        self.metrics_display.setWordWrap(True)
+        metrics_layout.addWidget(self.metrics_display)
+
+        metrics_group.setLayout(metrics_layout)
+        layout.addWidget(metrics_group)
 
         return tab
 
     def create_visualization_tab(self) -> QWidget:
-        """Create the visualization tab with charts and graphs."""
+        """Create the data visualization interface with interactive charts."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        # Create sub-tabs for different visualizations
         viz_tabs = QTabWidget()
 
-        # Market Share Charts
+        # Market Share visualization
         self.market_share_widget = self.create_market_share_view()
         viz_tabs.addTab(self.market_share_widget, "Market Share")
 
-        # Regional Analysis
+        # Regional Analysis visualization
         self.regional_widget = self.create_regional_view()
         viz_tabs.addTab(self.regional_widget, "Regional Analysis")
 
-        # Trend Analysis
+        # Trend Analysis visualization
         self.trend_widget = self.create_trend_view()
         viz_tabs.addTab(self.trend_widget, "Trends")
 
@@ -211,7 +300,7 @@ class ModernMarketAnalyzer(QMainWindow):
             )
             if path:
                 self.input_edit.setText(path)
-                sheets = load_sheet_names(path)
+                sheets = self.file_handler.load_excel_sheets(path)
                 self.sheet_combo.clear()
                 self.sheet_combo.addItems(sheets)
                 logger.info(f"Selected input file: {path}")
@@ -236,56 +325,66 @@ class ModernMarketAnalyzer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to select output file:\n{str(e)}")
 
     def process_data(self):
-        """Process the input data and update results."""
+        """Process the input data and update all visualizations."""
         try:
             if not self.validate_inputs():
                 return
 
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
             self.statusBar().showMessage("Processing data...")
 
-            # Read input data
-            df = self.read_input_data()
-            if df is None:
-                return
+            # Read and validate input data
+            df = self.file_handler.read_excel_data(
+                file_path=self.input_edit.text(),
+                sheet_name=self.sheet_combo.currentText()
+            )
+            self.progress_bar.setValue(20)
 
-            # Apply filters
+            # Apply data filters
             df = self.apply_filters(df)
+            self.progress_bar.setValue(40)
 
-            # Process based on analyzer type
+            # Process based on analyzer selection
             analyzer_type = self.analyzer_combo.currentText()
             if analyzer_type == "Consolidated":
                 self.process_consolidated(df)
             else:
                 self.process_single_analyzer(df, analyzer_type)
 
+            self.progress_bar.setValue(100)
             self.statusBar().showMessage("Processing complete", 5000)
 
         except Exception as e:
             logger.error(f"Error processing data: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error processing data: {str(e)}")
             self.statusBar().showMessage("Processing failed")
+        finally:
+            self.progress_bar.setVisible(False)
 
     def process_single_analyzer(self, df: pd.DataFrame, analyzer_type: str):
-        """Process data for a single analyzer type."""
+        """Process data for a single analyzer type with comprehensive analysis."""
         try:
-            # Get analysis results
+            # Perform market share analysis
             results = WorkingAggregator.analyze_market_data(
                 df=df,
                 config=self.config.config_data,
                 analyzer_type=analyzer_type
             )
 
-            # Store the latest results
+            if results is None:
+                logger.warning(f"No results for analyzer type: {analyzer_type}")
+                QMessageBox.warning(self, "No Data", f"No results found for {analyzer_type}.")
+                return
+
+            # Store results and update displays
             self.latest_results = results
-
-            # Update results display
             self.update_results_display(results, analyzer_type)
-
-            # Save results
             self.save_results(results, analyzer_type)
-
-            # Update visualizations
             self.update_visualizations(results, analyzer_type)
+
+            # Calculate and display additional metrics
+            self.calculate_advanced_metrics(df, results, analyzer_type)
 
         except Exception as e:
             logger.error(f"Error processing {analyzer_type}: {str(e)}")
@@ -310,11 +409,7 @@ class ModernMarketAnalyzer(QMainWindow):
 
                 # Update results display
                 self.update_results_display(results, analyzer_type)
-
-                # Save results
                 self.save_results(results, analyzer_type)
-
-                # Update visualizations
                 self.update_visualizations(results, analyzer_type)
 
             QMessageBox.information(self, "Processing Complete", "Consolidated processing completed successfully.")
@@ -363,111 +458,314 @@ class ModernMarketAnalyzer(QMainWindow):
         if self.class_check.isChecked() and results.class_pivot is not None:
             self.update_regional_chart(results.class_pivot, "Class")
 
-    def update_market_share_chart(self, results: AnalysisResult, analyzer_type: str):
-        """Update the market share pie chart."""
-        self.clear_layout(self.market_share_layout)
+    def calculate_advanced_metrics(self, df: pd.DataFrame,
+                                 results: AnalysisResult,
+                                 analyzer_type: str):
+        """Calculate advanced metrics for deeper market analysis."""
+        metrics_text = f"Advanced Metrics for {analyzer_type}:\n\n"
 
-        # Volume Market Share
-        if self.show_volume.isChecked() and results.market_share:
-            fig1, ax1 = plt.subplots(figsize=(6, 6))
-            brands = list(results.market_share.keys())
-            shares = list(results.market_share.values())
-            ax1.pie(shares, labels=brands, autopct='%1.1f%%', startangle=140)
-            ax1.set_title(f'{analyzer_type} Volume Market Share')
-            canvas1 = FigureCanvas(fig1)
-            self.market_share_layout.addWidget(canvas1)
+        # Market concentration metrics
+        total_market = sum(results.brand_totals.values())
+        top_brands = dict(sorted(results.market_share.items(),
+                         key=lambda x: x[1], reverse=True)[:3])
 
-        # Value Market Share
-        if self.show_value.isChecked() and results.brand_values:
-            value_share = WorkingAggregator.calculate_market_share(results.brand_values)
-            if value_share:
-                fig2, ax2 = plt.subplots(figsize=(6, 6))
-                brands = list(value_share.keys())
-                shares = list(value_share.values())
-                ax2.pie(shares, labels=brands, autopct='%1.1f%%', startangle=140)
-                ax2.set_title(f'{analyzer_type} Value Market Share')
-                canvas2 = FigureCanvas(fig2)
-                self.market_share_layout.addWidget(canvas2)
+        metrics_text += "Market Concentration:\n"
+        metrics_text += f"Top 3 Brands Market Share: {sum(top_brands.values()):.1f}%\n"
 
-        plt.close('all')
+        # Regional distribution
+        if "Region" in df.columns:
+            region_counts = df["Region"].value_counts()
+            metrics_text += f"\nRegional Distribution:\n"
+            for region, count in region_counts.items():
+                metrics_text += f"{region}: {count} sites\n"
+
+        self.metrics_display.setText(metrics_text)
 
     def create_market_share_view(self) -> QWidget:
-        """Create the market share visualization widget."""
+        """Create the market share visualization interface with interactive controls."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        # Add chart options
-        options_group = QGroupBox("Display Options")
-        options_layout = QHBoxLayout()
+        # Visualization controls
+        controls_group = QGroupBox("Display Options")
+        controls_layout = QHBoxLayout()
 
-        self.show_volume = QCheckBox("Volume Share")
+        self.show_volume = QCheckBox("Volume Market Share")
         self.show_volume.setChecked(True)
-        self.show_volume.stateChanged.connect(self.toggle_market_share_visibility)
-        self.show_value = QCheckBox("Value Share")
+        self.show_volume.stateChanged.connect(self.refresh_visualizations)
+
+        self.show_value = QCheckBox("Value Market Share")
         self.show_value.setChecked(True)
-        self.show_value.stateChanged.connect(self.toggle_market_share_visibility)
+        self.show_value.stateChanged.connect(self.refresh_visualizations)
 
-        options_layout.addWidget(self.show_volume)
-        options_layout.addWidget(self.show_value)
-        options_group.setLayout(options_layout)
+        controls_layout.addWidget(self.show_volume)
+        controls_layout.addWidget(self.show_value)
+        controls_group.setLayout(controls_layout)
+        layout.addWidget(controls_group)
 
-        layout.addWidget(options_group)
-
-        # Placeholder for charts
+        # Chart area
         self.market_share_chart_area = QWidget()
         self.market_share_layout = QVBoxLayout(self.market_share_chart_area)
         layout.addWidget(self.market_share_chart_area)
 
         return widget
 
+    def refresh_visualizations(self):
+        """Update all visualizations with current analysis results."""
+        if self.latest_results:
+            self.update_market_share_chart(
+                self.latest_results,
+                self.analyzer_combo.currentText()
+            )
+            self.update_regional_analysis()
+            self.update_trend_analysis()
+        else:
+            self.statusBar().showMessage("No analysis results available")
+
+    def update_market_share_chart(self, results: AnalysisResult, analyzer_type: str):
+        """Create and display market share visualization charts."""
+        self.clear_layout(self.market_share_layout)
+
+        # Gather all brands from volume and value market share
+        all_brands = set(results.market_share.keys())
+        if results.brand_values:
+            all_brands.update(results.brand_values.keys())
+        all_brands = sorted(all_brands)
+        colors = plt.cm.Set3(np.linspace(0, 1, len(all_brands)))
+        brand_color_map = dict(zip(all_brands, colors))
+
+        # Volume Market Share Chart
+        if self.show_volume.isChecked() and results.market_share:
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+            brands = list(results.market_share.keys())
+            shares = list(results.market_share.values())
+            volume_colors = [brand_color_map[brand] for brand in brands]
+
+            wedges, texts, autotexts = ax.pie(
+                shares,
+                labels=brands,
+                colors=volume_colors,
+                autopct='%1.1f%%',
+                startangle=90
+            )
+
+            ax.set_title(f'{analyzer_type} Volume Market Share')
+
+            # Enhance text visibility
+            plt.setp(autotexts, size=9, weight="bold")
+            plt.setp(texts, size=10)
+
+            canvas = FigureCanvas(fig)
+            self.market_share_layout.addWidget(canvas)
+
+        # Value Market Share Chart
+        if self.show_value.isChecked() and results.brand_values:
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+            value_share = WorkingAggregator.calculate_market_share(results.brand_values)
+            value_brands = list(value_share.keys())
+            value_shares = list(value_share.values())
+            value_colors = [brand_color_map[brand] for brand in value_brands]
+
+            wedges, texts, autotexts = ax.pie(
+                value_shares,
+                labels=value_brands,
+                colors=value_colors,
+                autopct='%1.1f%%',
+                startangle=90
+            )
+
+            ax.set_title(f'{analyzer_type} Value Market Share')
+
+            plt.setp(autotexts, size=9, weight="bold")
+            plt.setp(texts, size=10)
+
+            canvas = FigureCanvas(fig)
+            self.market_share_layout.addWidget(canvas)
+
+        plt.close('all')
+
     def create_regional_view(self) -> QWidget:
-        """Create the regional analysis visualization widget."""
+        """Create the regional analysis visualization interface."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         # Analysis type selection
-        analysis_group = QGroupBox("Regional Analysis Options")
-        analysis_layout = QFormLayout()
+        controls_group = QGroupBox("Regional Analysis Controls")
+        controls_layout = QFormLayout()
 
         self.regional_analysis_combo = QComboBox()
         self.regional_analysis_combo.addItems(['City Analysis', 'Class Analysis'])
-        self.regional_analysis_combo.currentTextChanged.connect(self.update_regional_chart_view)
+        self.regional_analysis_combo.currentTextChanged.connect(self.update_regional_analysis)
 
-        analysis_layout.addRow("Analysis Type:", self.regional_analysis_combo)
-        analysis_group.setLayout(analysis_layout)
+        self.chart_type = QComboBox()
+        self.chart_type.addItems(['Bar Chart', 'Pie Chart', 'Heatmap'])
+        self.chart_type.currentTextChanged.connect(self.update_regional_analysis)
 
-        layout.addWidget(analysis_group)
+        controls_layout.addRow("Analysis Type:", self.regional_analysis_combo)
+        controls_layout.addRow("Chart Type:", self.chart_type)
 
-        # Placeholder for regional chart
+        controls_group.setLayout(controls_layout)
+        layout.addWidget(controls_group)
+
+        # Chart area
         self.regional_chart_area = QWidget()
         self.regional_chart_layout = QVBoxLayout(self.regional_chart_area)
         layout.addWidget(self.regional_chart_area)
 
         return tab
 
+    def update_regional_analysis(self):
+        """Update regional analysis visualization based on selected options."""
+        self.clear_layout(self.regional_chart_layout)
+
+        if not self.latest_results:
+            self.regional_chart_layout.addWidget(
+                QLabel("Please process data to view regional analysis")
+            )
+            return
+
+        analysis_type = self.regional_analysis_combo.currentText()
+        chart_type = self.chart_type.currentText()
+
+        try:
+            if analysis_type == 'City Analysis':
+                data = self.latest_results.city_pivot
+                category = 'City'
+            else:
+                data = self.latest_results.class_pivot
+                category = 'Class'
+
+            if data is None or data.empty:
+                self.regional_chart_layout.addWidget(
+                    QLabel(f"No {analysis_type} data available")
+                )
+                return
+
+            fig = self.create_regional_chart(data, category, chart_type)
+            canvas = FigureCanvas(fig)
+            self.regional_chart_layout.addWidget(canvas)
+
+        except Exception as e:
+            logger.error(f"Error updating regional analysis: {str(e)}")
+            self.regional_chart_layout.addWidget(
+                QLabel(f"Error creating visualization: {str(e)}")
+            )
+
+    def create_regional_chart(self, data: pd.DataFrame,
+                              category: str, chart_type: str) -> Figure:
+        """Create regional analysis chart based on selected type."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        if chart_type == 'Bar Chart':
+            data.plot(kind='bar', ax=ax)
+            plt.xticks(rotation=45)
+        elif chart_type == 'Pie Chart':
+            # For Pie Chart, sum across brands if multiple
+            if 'BRAND' in data.columns:
+                # Sum allocated yearly per category
+                summed = data.groupby(category).sum()
+                summed.plot(kind='pie', y=summed.columns[0], autopct='%1.1f%%', ax=ax)
+            else:
+                data.plot(kind='pie', autopct='%1.1f%%', ax=ax)
+        else:  # Heatmap
+            sns.heatmap(data, annot=True, fmt='.1f', ax=ax)
+
+        ax.set_title(f'{category} Distribution Analysis')
+        plt.tight_layout()
+
+        return fig
+
     def create_trend_view(self) -> QWidget:
-        """Create the trend analysis visualization widget."""
+        """Create the trend analysis visualization interface."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        # Trend options
-        trend_group = QGroupBox("Trend Analysis Options")
-        trend_layout = QFormLayout()
+        # Trend analysis controls
+        controls_group = QGroupBox("Trend Analysis Controls")
+        controls_layout = QFormLayout()
 
-        self.trend_type_combo = QComboBox()
-        self.trend_type_combo.addItems(['Monthly', 'Quarterly', 'Yearly'])
-        self.trend_type_combo.currentTextChanged.connect(self.update_trend_chart)
+        self.trend_period = QComboBox()
+        self.trend_period.addItems(['Monthly', 'Quarterly', 'Yearly'])
+        self.trend_period.currentTextChanged.connect(self.update_trend_analysis)
 
-        trend_layout.addRow("Time Period:", self.trend_type_combo)
-        trend_group.setLayout(trend_layout)
-        layout.addWidget(trend_group)
+        self.trend_metric = QComboBox()
+        self.trend_metric.addItems([
+            'Market Share',
+            'Total Volume',
+            'Value Distribution'
+        ])
+        self.trend_metric.currentTextChanged.connect(self.update_trend_analysis)
 
-        # Placeholder for trend chart
+        controls_layout.addRow("Time Period:", self.trend_period)
+        controls_layout.addRow("Metric:", self.trend_metric)
+
+        controls_group.setLayout(controls_layout)
+        layout.addWidget(controls_group)
+
+        # Chart area
         self.trend_chart_area = QWidget()
         self.trend_chart_layout = QVBoxLayout(self.trend_chart_area)
         layout.addWidget(self.trend_chart_area)
 
         return tab
+
+    def update_trend_analysis(self):
+        """Update the trend analysis chart based on selected time period and metric."""
+        self.clear_layout(self.trend_chart_layout)
+        # Implement trend analysis visualization based on 'self.latest_results'
+        if not self.latest_results:
+            self.trend_chart_layout.addWidget(
+                QLabel("Please process data to view trend analysis")
+            )
+            return
+
+        # Placeholder implementation
+        trend_period = self.trend_period.currentText()
+        trend_metric = self.trend_metric.currentText()
+
+        try:
+            if trend_metric == 'Market Share':
+                data = self.latest_results.market_share
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.lineplot(x=list(range(len(data))), y=list(data.values()), marker='o', ax=ax)
+                ax.set_title(f'{trend_period} Market Share Trend')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Market Share (%)')
+                plt.tight_layout()
+                canvas = FigureCanvas(fig)
+                self.trend_chart_layout.addWidget(canvas)
+
+            elif trend_metric == 'Total Volume':
+                data = self.latest_results.brand_totals
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.lineplot(x=list(range(len(data))), y=list(data.values()), marker='o', ax=ax)
+                ax.set_title(f'{trend_period} Total Volume Trend')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Total Volume')
+                plt.tight_layout()
+                canvas = FigureCanvas(fig)
+                self.trend_chart_layout.addWidget(canvas)
+
+            elif trend_metric == 'Value Distribution':
+                data = self.latest_results.brand_values
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.lineplot(x=list(range(len(data))), y=list(data.values()), marker='o', ax=ax)
+                ax.set_title(f'{trend_period} Value Distribution Trend')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Value Distribution')
+                plt.tight_layout()
+                canvas = FigureCanvas(fig)
+                self.trend_chart_layout.addWidget(canvas)
+
+            plt.close('all')
+
+        except Exception as e:
+            logger.error(f"Error updating trend analysis: {str(e)}")
+            self.trend_chart_layout.addWidget(
+                QLabel(f"Error creating trend visualization: {str(e)}")
+            )
 
     def validate_inputs(self) -> bool:
         """Validate all input parameters before processing."""
@@ -484,24 +782,6 @@ class ModernMarketAnalyzer(QMainWindow):
             return False
 
         return True
-
-    def read_input_data(self) -> Optional[pd.DataFrame]:
-        """Read and validate input Excel file."""
-        try:
-            df = pd.read_excel(
-                self.input_edit.text(),
-                sheet_name=self.sheet_combo.currentText()
-            )
-
-            # Replace null values
-            df = df.replace(["NILL", "Nill", "nill", "NIL"], np.nan)
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Error reading input file: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to read input file: {str(e)}")
-            return None
 
     def apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply selected filters to the dataset."""
@@ -521,139 +801,163 @@ class ModernMarketAnalyzer(QMainWindow):
                 if widget is not None:
                     widget.deleteLater()
 
-    def apply_modern_style(self):
-        """Apply modern styling to the application."""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f0f2f5;
-            }
-            QTabWidget::pane {
-                border: 1px solid #cccccc;
-                background: white;
-                border-radius: 4px;
-            }
-            QTabBar::tab {
-                background: #e0e0e0;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }
-            QTabBar::tab:selected {
-                background: white;
-                border-bottom: none;
-            }
-            QPushButton {
-                background-color: #1976d2;
-                color: white;
-                padding: 8px 16px;
-                border: none;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-            }
-            QGroupBox {
-                background-color: white;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 1em;
-                padding-top: 1em;
-            }
-            QLineEdit, QComboBox {
-                padding: 6px;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-            }
-        """)
-
-    def toggle_market_share_visibility(self):
-        """Toggle the visibility of volume and value market share charts."""
-        if self.latest_results:
-            self.update_market_share_chart(self.latest_results, self.analyzer_combo.currentText())
-        else:
-            QMessageBox.warning(self, "No Data", "Please process data before toggling visualization options.")
-
-    def update_regional_chart_view(self, analysis_type: str):
-        """Update the regional analysis chart based on selected type."""
+    def update_regional_chart(self, pivot_df: pd.DataFrame, analysis_type: str):
+        """Update the regional chart with the provided pivot DataFrame."""
         self.clear_layout(self.regional_chart_layout)
 
-        if not self.latest_results:
-            QMessageBox.warning(self, "No Data", "Please process data before viewing visualizations.")
+        if pivot_df is None or pivot_df.empty:
+            self.regional_chart_layout.addWidget(QLabel("No data available for this analysis."))
             return
 
-        if analysis_type == 'City Analysis':
-            if self.latest_results.city_pivot is not None and not self.latest_results.city_pivot.empty:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                self.latest_results.city_pivot.plot(kind='bar', ax=ax)
-                ax.set_title('City Analysis Distribution')
-                ax.set_xlabel('City')
-                ax.set_ylabel('Allocated Yearly')
-                plt.tight_layout()
-                canvas = FigureCanvas(fig)
-                self.regional_chart_layout.addWidget(canvas)
-                plt.close('all')
-            else:
-                self.regional_chart_layout.addWidget(QLabel("No City Analysis data available."))
-        elif analysis_type == 'Class Analysis':
-            if self.latest_results.class_pivot is not None and not self.latest_results.class_pivot.empty:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                self.latest_results.class_pivot.plot(kind='bar', ax=ax)
-                ax.set_title('Class Analysis Distribution')
-                ax.set_xlabel('Class')
-                ax.set_ylabel('Allocated Yearly')
-                plt.tight_layout()
-                canvas = FigureCanvas(fig)
-                self.regional_chart_layout.addWidget(canvas)
-                plt.close('all')
-            else:
-                self.regional_chart_layout.addWidget(QLabel("No Class Analysis data available."))
+        fig, ax = plt.subplots(figsize=(10, 6))
+        pivot_df.plot(kind='bar', ax=ax)
+        ax.set_title(f'{analysis_type} Distribution')
+        ax.set_xlabel(analysis_type)
+        ax.set_ylabel('Allocated Yearly')
 
-    def update_trend_chart(self):
-        """Update the trend analysis chart based on selected time period."""
-        self.clear_layout(self.trend_chart_layout)
-        # Implement trend analysis visualization based on 'self.latest_results'
-        if not self.latest_results:
-            QMessageBox.warning(self, "No Data", "Please process data before viewing trend visualizations.")
-            return
+        plt.tight_layout()
+        canvas = FigureCanvas(fig)
+        self.regional_chart_layout.addWidget(canvas)
 
-        # Placeholder implementation
-        trend_type = self.trend_type_combo.currentText()
-        if trend_type == 'Monthly':
-            # Implement monthly trend analysis
-            QMessageBox.information(self, "Info", "Monthly Trend Analysis not implemented yet.")
-        elif trend_type == 'Quarterly':
-            # Implement quarterly trend analysis
-            QMessageBox.information(self, "Info", "Quarterly Trend Analysis not implemented yet.")
-        elif trend_type == 'Yearly':
-            # Implement yearly trend analysis
-            QMessageBox.information(self, "Info", "Yearly Trend Analysis not implemented yet.")
+        plt.close('all')
+
+    def update_trend_analysis(self):
+        """Placeholder method if additional processing is needed."""
+        pass  # Already handled in `update_trend_analysis` method above
+
+    def update_regional_analysis(self):
+        """Placeholder method to ensure regional analysis updates correctly."""
+        # This method can be implemented similarly to update_trend_analysis if needed
+        pass
 
     def save_results(self, results: AnalysisResult, analyzer_type: str):
-        """Save the analysis results to the output Excel file."""
+        """Export analysis results to Excel with formatted worksheets."""
         try:
+            if xlsxwriter is None:
+                raise ImportError("xlsxwriter module is not installed.")
+
             output_path = self.output_edit.text()
-            aggregator = WorkingAggregator()
-            aggregator.save_analysis_results(results, output_path, analyzer_type)
+
+            # Create Excel writer object
+            with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+                workbook = writer.book
+
+                # Define formats
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#4F81BD',
+                    'font_color': 'white',
+                    'border': 1
+                })
+
+                number_format = workbook.add_format({
+                    'num_format': '#,##0.00',
+                    'border': 1
+                })
+
+                percent_format = workbook.add_format({
+                    'num_format': '0.00%',
+                    'border': 1
+                })
+
+                # Create summary dataframe
+                summary_data = {
+                    'Brand': list(results.market_share.keys()),
+                    'Market Share (%)': list(results.market_share.values()),
+                    'Total Volume': [results.brand_totals[brand] for brand in results.market_share.keys()]
+                }
+
+                if results.brand_values:
+                    summary_data['Value'] = [results.brand_values[brand] for brand in results.market_share.keys()]
+
+                summary_df = pd.DataFrame(summary_data)
+
+                # Write summary sheet
+                summary_df.to_excel(writer, sheet_name=f'{analyzer_type}_Summary', index=False)
+
+                # Get worksheet object
+                summary_ws = writer.sheets[f'{analyzer_type}_Summary']
+
+                # Apply header format
+                for col_num, value in enumerate(summary_df.columns.values):
+                    summary_ws.write(0, col_num, value, header_format)
+
+                # Apply number formats
+                summary_ws.set_column('B:B', 18, percent_format)
+                summary_ws.set_column('C:C', 15, number_format)
+                if results.brand_values:
+                    summary_ws.set_column('D:D', 15, number_format)
+
+                # Add pivot tables if available
+                if results.city_pivot is not None:
+                    results.city_pivot.to_excel(writer, sheet_name=f'{analyzer_type}_City_Analysis', index=False)
+                    city_ws = writer.sheets[f'{analyzer_type}_City_Analysis']
+                    for col_num, value in enumerate(results.city_pivot.columns.values):
+                        city_ws.write(0, col_num, value, header_format)
+                    city_ws.set_column('B:B', 18, number_format)
+
+                if results.class_pivot is not None:
+                    results.class_pivot.to_excel(writer, sheet_name=f'{analyzer_type}_Class_Analysis', index=False)
+                    class_ws = writer.sheets[f'{analyzer_type}_Class_Analysis']
+                    for col_num, value in enumerate(results.class_pivot.columns.values):
+                        class_ws.write(0, col_num, value, header_format)
+                    class_ws.set_column('B:B', 18, number_format)
+
+            self.statusBar().showMessage(f"Results saved to {output_path}", 5000)
             logger.info(f"Results saved to {output_path}")
+
             QMessageBox.information(self, "Success", f"Results saved to {output_path}")
+
+        except ImportError as ie:
+            logger.error(f"Error saving results: {ie}")
+            QMessageBox.critical(self, "Missing Dependency", "The 'xlsxwriter' module is required but not installed.\nPlease install it using 'pip install XlsxWriter'.")
         except Exception as e:
-            logger.error(f"Error saving results: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to save results:\n{str(e)}")
+            logger.error(f"Error saving results: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save results: {str(e)}")
 
     def open_settings(self):
         """Open the settings dialog."""
-        # Implement your settings dialog logic here
-        QMessageBox.information(self, "Settings", "Settings dialog not implemented yet.")
+        dialog = SettingsDialog(self.config)
+        if dialog.exec_():
+            # Reload configuration if needed
+            self.config.load_config()
+            # Update region_combo in case regions have changed
+            regions = self.config.config_data.get("metadata", {}).get("regions", ["Region1", "Region2"])
+            self.region_combo.clear()
+            self.region_combo.addItems(["All"] + regions)
+            QMessageBox.information(self, "Settings Updated", "Settings have been updated successfully.")
+
+def setup_application():
+    """Initialize the application with proper error handling."""
+    try:
+        app = QApplication(sys.argv)
+        app.setStyle('Fusion')  # Apply modern style
+
+        # Create and show the main window
+        window = ModernMarketAnalyzer()
+        window.show()
+
+        return app, window
+    except Exception as e:
+        logger.error(f"Error initializing application: {e}")
+        raise
 
 def main():
-    print("DEBUG: About to create QApplication")
-    logging.info("Launching Market Share Analysis Tool.")
-    app = QApplication(sys.argv)
-    window = ModernMarketAnalyzer()
-    window.show()
-    sys.exit(app.exec_())
+    """Main entry point for the Market Share Analysis Tool."""
+    try:
+        # Configure logging (already configured at the top)
+        logger.info("Starting Market Share Analysis Tool")
+
+        # Initialize application
+        app, window = setup_application()
+
+        # Execute application
+        sys.exit(app.exec_())
+
+    except Exception as e:
+        logger.error(f"Application failed to start: {e}")
+        print(f"Error starting application: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

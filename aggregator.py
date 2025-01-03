@@ -170,7 +170,7 @@ class WorkingAggregator:
         return {
             "total_sites": df["Customer Name"].nunique(),
             "total_volume": sum(brand_totals.values()),
-            "top_brand": max(market_share.items(), key=lambda x: x[1])[0],
+            "top_brand": max(market_share.items(), key=lambda x: x[1])[0] if market_share else "N/A",
             "unique_cities": df["CITY"].nunique(),
             "unique_classes": df["Class"].nunique(),
             "class_distribution": df["Class"].value_counts().to_dict(),
@@ -189,18 +189,21 @@ class WorkingAggregator:
             # Validate input data
             cls.validate_data(df)
 
-            if analyzer_type not in config["analyzers"]:
-                raise ValueError(f"Invalid analyzer type: {analyzer_type}")
+            # Check if analyzer_type exists in headers and cost_per_test
+            if analyzer_type not in config["headers"]:
+                raise ValueError(f"Analyzer type '{analyzer_type}' not found in headers configuration.")
+            if analyzer_type not in config["cost_per_test"]:
+                raise ValueError(f"Analyzer type '{analyzer_type}' not found in cost_per_test configuration.")
 
-            analyzer_config = config["analyzers"][analyzer_type]
-            brand_cols = analyzer_config.get("brand_columns", [])
-            workload_cols = analyzer_config.get("workload_columns", [])
+            analyzer_config = config["headers"][analyzer_type]
+            brand_cols = analyzer_config.get("brand_cols", [])
+            workload_cols = analyzer_config.get("workload_cols", [])
+            test_price = config["cost_per_test"].get(analyzer_type, 0)
 
             if not brand_cols or not workload_cols:
-                raise ValueError(f"Missing column configuration for {analyzer_type}")
+                raise ValueError(f"Missing brand or workload columns for analyzer type '{analyzer_type}'.")
 
-            days_per_year = config["analysis_settings"]["days_per_year"]
-            test_price = analyzer_config.get("test_price", 0)
+            days_per_year = config["days_per_year"]
 
             # Volume-based analysis
             brand_totals = cls.calculate_brand_totals(

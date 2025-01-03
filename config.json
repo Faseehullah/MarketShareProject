@@ -45,6 +45,6 @@
   "cost_per_test": {
     "IA": 250,
     "CBC": 120,
-    "CHEM": 160
+    "CHEM": 260
   }
 }
